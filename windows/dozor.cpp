@@ -120,6 +120,17 @@ void changeApps(HANDLE engine, dozor::Action action, UINT64 vpn, bool remove, in
     tx.commit();
 }
 UINT64 tunnel(const GUID& id) {
+#ifdef DOZOR_TEST_LOOPBACK
+    // This executable is built only for the disposable CI client.
+    // Resolve the adapter through a kernel route lookup, never through an external request.
+    SOCKADDR_INET address{};
+    address.Ipv4.sin_family = AF_INET;
+    address.Ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    MIB_IPFORWARD_ROW2 route{};
+    SOCKADDR_INET source{};
+    check(GetBestRoute2(nullptr, 0, nullptr, &address, 0, &route, &source), "resolve fixture loopback");
+    return route.InterfaceLuid.Value;
+#else
     NET_LUID luid{};
     check(ConvertInterfaceGuidToLuid(&id, &luid), "resolve interface GUID");
     MIB_IF_ROW2 row{};
@@ -129,6 +140,7 @@ UINT64 tunnel(const GUID& id) {
         row.Type == IF_TYPE_SOFTWARE_LOOPBACK || !luid.Value)
         throw Failure{"selected interface must be virtual, up, and not loopback", ERROR_NOT_READY};
     return luid.Value;
+#endif
 }
 }
 int wmain(int argc, wchar_t** argv) {

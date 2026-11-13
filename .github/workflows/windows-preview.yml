@@ -12,13 +12,13 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
-      - run: cmake -S windows -B build -A x64
+      - run: cmake -S windows -B build -A x64 -DDOZOR_WINDOWS_INTEGRATION_TESTS=ON
       - run: cmake --build build --config Debug
       - run: ctest --test-dir build -C Debug --output-on-failure
       - name: Exercise WFP with a disposable test client
         shell: powershell
-        run: ./windows/tests/loopback.ps1 -Dozor (Resolve-Path ./build/Debug/dozor-win.exe)
-      - run: cmake --build build --config Release
+        run: ./windows/tests/loopback.ps1 -Dozor (Resolve-Path ./build/Debug/dozor-win.exe) -FixtureController (Resolve-Path ./build/Debug/dozor-loopback-fixture.exe)
+      - run: cmake --build build --config Release --target dozor-win
       - uses: actions/upload-artifact@v4
         with:
           name: dozor-windows-x64-preview
