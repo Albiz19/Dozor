@@ -23,6 +23,7 @@
 
 ```sh
 brew tap albiz19/dozor https://github.com/Albiz19/Dozor.git
+brew trust --cask albiz19/dozor/dozor
 brew install --cask albiz19/dozor/dozor
 open -a Dozor
 ```

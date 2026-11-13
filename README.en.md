@@ -8,6 +8,7 @@ Dozor 0.1 runs on Apple Silicon with macOS 13 or later. Its UI is in Russian. It
 
 ```sh
 brew tap albiz19/dozor https://github.com/Albiz19/Dozor.git
+brew trust --cask albiz19/dozor/dozor
 brew install --cask albiz19/dozor/dozor
 ```
 
