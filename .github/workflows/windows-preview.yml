@@ -1,0 +1,25 @@
+name: Windows preview
+on:
+  workflow_dispatch:
+  pull_request:
+    paths: ['windows/**', '.github/workflows/windows-preview.yml']
+  push:
+    paths: ['windows/**', '.github/workflows/windows-preview.yml']
+permissions:
+  contents: read
+jobs:
+  build-and-test:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S windows -B build -A x64
+      - run: cmake --build build --config Debug
+      - run: ctest --test-dir build -C Debug --output-on-failure
+      - name: Exercise WFP with a disposable test client
+        shell: powershell
+        run: ./windows/tests/loopback.ps1 -Dozor (Resolve-Path ./build/Debug/dozor-win.exe)
+      - run: cmake --build build --config Release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dozor-windows-x64-preview
+          path: build/Release/dozor-win.exe
