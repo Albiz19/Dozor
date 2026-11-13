@@ -4,7 +4,7 @@ set -e
 cd "$(dirname "$0")"
 APP=Dozor.app
 RELEASE_VERSION=$(cat VERSION)
-BUILD_NUMBER=1
+BUILD_NUMBER=2
 BUILD_TMP=$(mktemp -d)
 trap 'rm -rf "$BUILD_TMP"' EXIT
 rm -rf $APP

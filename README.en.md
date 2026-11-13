@@ -4,7 +4,7 @@
 
 A VPN reconnect can change your public IP in the middle of a work session. Dozor checks the observed exits against your trusted IPs and can suspend selected apps and their children when a route changes. This helps reduce unexpected IP changes seen by online services. Each service makes its own account security decisions.
 
-Dozor 0.1 runs on Apple Silicon with macOS 13 or later. Its UI is in Russian. It includes a menu bar IP monitor, latency history, Telegram notifications for freeze/resume events, a restricted launcher for Claude Code, and source for an optional macOS network filter.
+Dozor 0.2 runs on Apple Silicon with macOS 13 or later. Its UI is in Russian. It includes a menu bar IP monitor, latency history, Telegram notifications for freeze/resume events, a restricted launcher for Claude Code, and source for an optional macOS network filter.
 
 ```sh
 brew tap albiz19/dozor https://github.com/Albiz19/Dozor.git
