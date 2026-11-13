@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 import os
 import signal
+import ctypes
 import subprocess
 import tempfile
 
@@ -30,9 +31,19 @@ with tempfile.TemporaryDirectory(prefix='dozor-checks-') as temporary:
         if verifier.wait(timeout=60) != 0:
             raise RuntimeError("fixture verifier failed")
     finally:
-        try:
-            os.killpg(verifier.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        # Foundation may give fixture children their own process group. Never
+        # walk the host table: validate only PIDs reported in this test directory.
+        if verifier.poll() is None:
+            verifier.kill()
         verifier.wait()
+        fixture_path = os.fsencode((root/'dozor-test-worker').resolve())
+        libc = ctypes.CDLL('/usr/lib/libSystem.B.dylib')
+        for record in (root/'state').glob('*/level*.pid'):
+            try:
+                pid = int(record.read_text())
+                path = ctypes.create_string_buffer(4096)
+                if pid > 1 and libc.proc_pidpath(pid, path, len(path)) > 0 and os.path.realpath(path.value) == fixture_path:
+                    os.kill(pid, signal.SIGKILL)
+            except (ValueError, ProcessLookupError):
+                pass
     subprocess.run([sys.executable, str(source / 'tests/network.py'), str(root / 'dozor-run'), str(root / 'verify')], check=True, env=env, timeout=40)

@@ -35,9 +35,28 @@ let dir = supportDir.appendingPathComponent(UUID().uuidString)
 try fm.createDirectory(at: dir, withIntermediateDirectories: true)
 try testServices()
 testRouteGuard()
+// Independent kernel UDP receiver: each fixture level writes a distinct tag.
+let heartbeatSocket = socket(AF_INET, SOCK_DGRAM, 0)
+precondition(heartbeatSocket >= 0)
+var dest = sockaddr_in()
+dest.sin_family = UInt8(AF_INET); dest.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+dest.sin_addr.s_addr = inet_addr("127.0.0.1")
+var addrSize = socklen_t(MemoryLayout<sockaddr_in>.size)
+withUnsafeMutablePointer(to: &dest) { ptr in
+    ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { addr in
+        precondition(bind(heartbeatSocket, addr, addrSize) == 0)
+        precondition(getsockname(heartbeatSocket, addr, &addrSize) == 0)
+    }
+}
+func receivedLevels() -> Set<UInt8> {
+    var seen = Set<UInt8>(), b: UInt8 = 0
+    while recv(heartbeatSocket, &b, 1, MSG_DONTWAIT) == 1 { seen.insert(b) }
+    precondition(errno == EWOULDBLOCK)
+    return seen
+}
 let fixture = Process()
 fixture.executableURL = supportDir.deletingLastPathComponent().appendingPathComponent("dozor-test-worker")
-fixture.arguments = [dir.path]
+fixture.arguments = [dir.path, String(UInt16(bigEndian: dest.sin_port))]
 try fixture.run()
 var fixturePIDs: [pid_t] = [fixture.processIdentifier]
 for _ in 0..<100 {
@@ -45,6 +64,9 @@ for _ in 0..<100 {
     usleep(20000)
 }
 fixturePIDs = try (0...2).map { pid_t(try String(contentsOf: dir.appendingPathComponent("level\($0).pid")))! }
+var controls = Set<UInt8>()
+for _ in 0..<100 where controls.count != 3 { controls.formUnion(receivedLevels()); usleep(10000) }
+expect(controls == [0,1,2], "all three unpaused fixtures deliver identifiable UDP traffic to the receiver")
 let processes = fixturePIDs.compactMap(LocalProcess.read)
 expect(processes.count == 3, "real parent, child and grandchild discovered")
 let root = processes[0]
@@ -121,10 +143,11 @@ expect(Monitor.traceIP("ip=192.0.2.1\nloc=AT") == ip && Monitor.traceIP("ip=brok
 monitor.enforce()
 controller.freeze(roots: [(root, "Fixture")]); waitForStopped(true)
 expect(controller.records.count == 3, "three fixture processes frozen")
+_ = receivedLevels() // discard packets queued before STOP was observed
 let heldBeats = beats()
 func held(_ name: String) {
     waitForStopped(true); usleep(80000)
-    expect(continues == 0 && heldBeats == beats(), name)
+    expect(continues == 0 && heldBeats == beats() && receivedLevels().isEmpty, name)
 }
 let old = begin(monitor)
 proxyUp = false; monitor.enforce()
@@ -173,6 +196,7 @@ m.vpnConnected = { id in id == "fixture-vpn" && vpnUp }
 reply(m,begin(m)); held("selected VPN off, listener up, ALL probes positive: zero SIGCONT")
 vpnUp = true; m.enforce(); held("VPN reconnected but no new probe: zero SIGCONT")
 reply(m,begin(m)); waitForStopped(false); usleep(180000)
+expect(receivedLevels() == [0,1,2], "all three fixtures deliver UDP again after fresh VPN proof")
 expect(continues == 3 && zip(heldBeats,beats()).allSatisfy { $0 != $1 }, "fresh full proof resumes all three; each heartbeat advances")
 expect(m.protectionStatus == .watching, "fresh guard decision is shown as active")
 m.state = .offline
