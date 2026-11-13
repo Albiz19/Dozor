@@ -17,11 +17,11 @@ with tempfile.TemporaryDirectory(prefix='dozor-checks-') as temporary:
     core = core[:a] + 'let supportDir = URL(fileURLWithPath: ProcessInfo.processInfo.environment["DOZOR_TEST_STATE"]!)\n' + core[b:]
     (root / 'Core.swift').write_text(core)
     env = dict(os.environ, CLANG_MODULE_CACHE_PATH=str(root / 'module-cache'), DOZOR_TEST_STATE=str(root / 'state'))
-    subprocess.run(['clang', str(source / 'tests/fixture.c'), '-o', str(root / 'claude')], check=True, env=env)
+    subprocess.run(['clang', str(source / 'tests/fixture.c'), '-o', str(root / 'dozor-test-worker')], check=True, env=env)
     subprocess.run(['swiftc', '-O', '-swift-version', '5', '-target', 'arm64-apple-macos13.0',
                     str(source / 'tests/main.swift'), str(source / 'tests/ServicesTests.swift'),
                     str(source / 'Telegram.swift'), str(source / 'ReleaseUpdates.swift'), str(root / 'Core.swift'), str(source / 'ProcessGuard.swift'),
-                    str(source / 'Monitor.swift'), str(source / 'ProtectionStatus.swift'), str(source / 'FilterController.swift'), str(source / 'Filter/FlowPolicy.swift'), str(source / 'UI.swift'), '-o', str(root / 'verify'),
+                    str(source / 'IncyTunnel.swift'), str(source / 'Monitor.swift'), str(source / 'ProtectionStatus.swift'), str(source / 'FilterController.swift'), str(source / 'Filter/FlowPolicy.swift'), str(source / 'UI.swift'), '-o', str(root / 'verify'),
                     '-framework', 'AppKit', '-framework', 'SwiftUI', '-framework', 'Charts',
                     '-framework', 'Network', '-framework', 'SystemConfiguration'], check=True, env=env)
     subprocess.run(['clang', '-O2', '-Wall', '-Werror', '-DDOZOR_TEST_BUILD', str(source / 'GuardedLaunch.c'), '-o', str(root / 'dozor-run')], check=True, env=env)
@@ -33,7 +33,7 @@ with tempfile.TemporaryDirectory(prefix='dozor-checks-') as temporary:
         processes = subprocess.check_output(['/bin/ps', '-axo', 'pid=,comm='], text=True)
         for line in processes.splitlines():
             parts = line.strip().split(None, 1)
-            if len(parts) == 2 and parts[1] == str(root / 'claude'):
+            if len(parts) == 2 and parts[1] == str(root / 'dozor-test-worker'):
                 try:
                     os.kill(int(parts[0]), signal.SIGKILL)
                 except ProcessLookupError:

@@ -14,6 +14,6 @@ brew install --cask albiz19/dozor/dozor
 
 Alternatively, clone the repository and run `./build.sh` with the Apple Command Line Tools installed. The public bundle is ad hoc signed. Gatekeeper may block downloaded builds. Enabling the optional system extension requires a properly provisioned Developer ID build.
 
-Add your VPN's trusted exit IPs before enabling protection. Configure the local HTTP proxy port and VPN service ID. Auto-resume requires fresh route checks and a connected system VPN service. With a proxy-only VPN, previously frozen processes stay frozen. Process suspension alone cannot guarantee zero packet loss or prevent direct traffic before detection. For the CLI launcher, the local proxy must route protected destinations exclusively through the intended tunnel.
+Add your VPN's trusted exit IPs before enabling protection. Configure the local HTTP proxy port and VPN service ID. Auto-resume requires fresh route checks and a connected system VPN service or a verified incy Xray TUN. With a proxy-only VPN, previously frozen processes stay frozen. Process suspension alone cannot guarantee zero packet loss or prevent direct traffic before detection. For the CLI launcher, the local proxy must route protected destinations exclusively through the intended tunnel.
 
 Check for a stable release from Settings → Updates, or run `brew update` followed by `brew upgrade --cask albiz19/dozor/dozor`. The app stores configuration outside its bundle. See the [setup guide](docs/GUIDE.md) for proxy, Telegram and signing details.

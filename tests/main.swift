@@ -20,7 +20,7 @@ let dir = supportDir.appendingPathComponent(UUID().uuidString)
 try fm.createDirectory(at: dir, withIntermediateDirectories: true)
 try testServices()
 let fixture = Process()
-fixture.executableURL = supportDir.deletingLastPathComponent().appendingPathComponent("claude")
+fixture.executableURL = supportDir.deletingLastPathComponent().appendingPathComponent("dozor-test-worker")
 fixture.arguments = [dir.path]
 try fixture.run()
 var fixturePIDs: [pid_t] = [fixture.processIdentifier]
@@ -36,7 +36,8 @@ fixturePIDs = try (0...2).map { pid_t(try String(contentsOf: dir.appendingPathCo
 let processes = fixturePIDs.compactMap(LocalProcess.read)
 expect(processes.count == 3, "real parent, child and grandchild discovered")
 let root = processes[0]
-expect(root.isClaudeCLI, "native CLI detected by executable path")
+let cliRoot = LocalProcess(identity:root.identity,parent:root.parent,path:"/synthetic/bin/claude",stopped:root.stopped)
+expect(cliRoot.isClaudeCLI, "native CLI detected by executable path")
 expect(!LocalProcess.isClaudeCLI(path: "/Applications/Claude.app/Contents/MacOS/Claude"), "CLI selection does not accidentally include Claude Desktop")
 expect(LocalProcess.isClaudeCLI(path: "/Users/test/.local/share/claude/versions/2.2.0"), "versioned native install detected")
 expect(LocalProcess.isClaudeCLI(path: "/opt/homebrew/bin/node", arguments: ["node", "/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js"]), "npm CLI script detected")
@@ -49,12 +50,13 @@ expect(ipMatches("2001:db8::1", rule: "2001:0db8:0:0:0:0:0:1"), "equivalent IPv6
 expect(!ipMatches("2001:db9::1", rule: "2001:db8::/32") && !ipMatches("192.0.2.1", rule: "2001:db8::/0"), "different IPv6 subnet and address family rejected")
 expect(ipMatches("192.0.2.5", rule: "192.0.2.0/24") && !ipMatches("192.0.3.5", rule: "192.0.2.0/24"), "IPv4 CIDR still works")
 let monitor = Monitor()
+monitor.readIncyTunnel = { nil }
 monitor.cfg.notifications = false
 monitor.cfg.guard.enabled = true
 monitor.cfg.guard.apps = [claudeCLITarget]
 monitor.cfg.guard.allow.ips = ["192.0.2.1"]
 monitor.cfg.guard.allow.countries = ["AT"]
-let snapshot = Dictionary(processes.map { ($0.identity.pid, $0) }, uniquingKeysWith: { a, _ in a })
+let snapshot = Dictionary(([cliRoot] + Array(processes.dropFirst())).map { ($0.identity.pid, $0) }, uniquingKeysWith: { a, _ in a })
 expect(monitor.matchedRoots(snapshot: snapshot).contains { $0.0.identity == root.identity }, "monitor targets CLI independently of GUI")
 monitor.cfg.guard.apps = ["com.anthropic.claude-code-url-handler"]
 expect(monitor.matchedRoots(snapshot: snapshot).contains { $0.0.identity == root.identity }, "existing URL-handler selection also protects CLI")
@@ -83,7 +85,7 @@ func waitForStopped(_ expected: Bool) {
 }
 func beats() -> [Data] { (0...2).map { try! Data(contentsOf: dir.appendingPathComponent("level\($0).beat")) } }
 func begin(_ m: Monitor) -> Int {
-    m.networkGeneration += 1; m.checking = true; m.proofStarted = Date(); return m.networkGeneration
+    m.beginRouteRound()
 }
 func reply(_ m: Monitor, _ g: Int, _ direct: [String]? = nil, _ secondary: [String]? = nil,
            _ traces: [String:String]? = nil, _ system: Bool = true, _ require6: Bool = false, _ verified6: Bool = false) {
@@ -117,12 +119,14 @@ let m = Monitor() // reads the same isolated persisted registry
 m.cfg.notifications = false; m.cfg.guard.enabled = true; m.cfg.guard.apps = ["dozor.test.uninstalled"]
 m.cfg.guard.allow.ips = [ip]; m.cfg.guard.allow.countries = ["AT"]
 m.proxyAcceptsConnections = { _ in proxyUp }; m.countryCache = monitor.countryCache
+m.readIncyTunnel = { nil }
 observe(m.processGuard)
 m.resumeLeftovers(); m.enforce()
 expect(m.processGuard.records.count == 3, "recovery retains PID + birth time")
 held("restart with VPN down sends zero SIGCONT")
 proxyUp = true; m.enforce(); held("local listener returning is insufficient to thaw")
 reply(m, begin(m), nil,nil,[:]); held("listener up / tunnel down: missing Claude proofs")
+expect(m.state == .error("Не подтверждён маршрут к Claude"), "failed round preserves the reason instead of checking forever")
 reply(m, begin(m), nil,nil,["api.anthropic.com":ip]); held("missing second Claude proof")
 reply(m, begin(m), nil,nil,nil,false); held("missing system route")
 reply(m, begin(m), nil,nil,nil,true,true,false); held("unverified available IPv6")
@@ -153,6 +157,35 @@ let stale = ProcessIdentity(pid:root.identity.pid,seconds:root.identity.seconds,
 expect(!stale.send(SIGSTOP), "stale PID identity rejected")
 m.processGuard.records[root.identity.pid] = FrozenProcess(identity:stale,name:"stale",depth:0)
 m.processGuard.save(); m.resumeLeftovers(); expect(m.processGuard.records.isEmpty,"restart ignores reused PID")
+// A proxied listener is neither necessary nor sufficient for the independent incy TUN path.
+m.cfg.guard.vpn_service_id = ""
+let first = IncyTunnel(pid:101, started:1, microseconds:0, index:71, name:"utun7", address:"198.18.0.2")
+let second = IncyTunnel(pid:102, started:2, microseconds:0, index:71, name:"utun7", address:"198.18.0.2")
+var fixtureTunnel: IncyTunnel? = first
+m.readIncyTunnel = { fixtureTunnel }
+m.processGuard.freeze(roots:[(root,"Fixture")]); waitForStopped(true)
+let restart = begin(m)
+fixtureTunnel = second
+reply(m,restart); waitForStopped(true)
+expect(continues == 3, "restarted Xray cannot use the previous tunnel's replies")
+let disconnect = begin(m)
+fixtureTunnel = nil
+reply(m,disconnect); waitForStopped(true)
+expect(continues == 3, "tunnel lost without OS network notification stays frozen")
+fixtureTunnel = first
+reply(m,begin(m),nil,[other]); waitForStopped(true)
+expect(continues == 3, "direct route outside allowlist prevents TUN recovery")
+proxyUp = false
+reply(m,begin(m)); waitForStopped(false)
+expect(continues == 6 && m.verifiedTunnel == first && m.mayThaw, "fresh incy TUN round releases all three without an HTTP proxy")
+m.processGuard.freeze(roots:[(root,"Fixture")]); waitForStopped(true)
+m.processGuard.sendContinue = { identity in
+    precondition(fixturePIDs.contains(identity.pid)); continues += 1
+    let sent = identity.send(SIGCONT); fixtureTunnel = nil; return sent
+}
+reply(m,begin(m)); waitForStopped(true)
+expect(continues == 7, "incy lost between signals stops remaining releases and recaptures the tree")
+m.cfg.guard.vpn_service_id = "fixture-vpn"; proxyUp = true
 // Deterministically simulate the proxy disappearing BETWEEN two candidate SIGCONT signals.
 m.processGuard.freeze(roots:[(root,"Fixture")]); waitForStopped(true)
 m.processGuard.sendContinue = { identity in
@@ -160,7 +193,7 @@ m.processGuard.sendContinue = { identity in
     let sent = identity.send(SIGCONT); proxyUp = false; return sent
 }
 reply(m,begin(m)); waitForStopped(true)
-expect(continues == 4, "mid-release loss stops remaining signals and re-freezes released descendant")
+expect(continues == 8, "mid-release loss stops remaining signals and re-freezes released descendant")
 // Exercise the actual grace-timeout branch with VPN off, without an intermediate SIGCONT.
 let beforeKill = continues
 m.cfg.guard.grace = 1; m.blockedSince = Date(timeIntervalSinceNow:-10); m.enforce()

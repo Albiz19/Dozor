@@ -347,7 +347,7 @@ struct ProtectionView: View {
 
             Section("Поведение") {
                 TextField("Идентификатор системной службы VPN", text: bind(\.guard.vpn_service_id))
-                Text("Без подтверждения статуса этой службы macOS Дозор никогда не размораживает уже остановленные процессы. Для прокси без системной службы автоматической разморозки нет.").font(.caption)
+                Text("Для incy в режиме TUN оставьте поле пустым. Для других VPN укажите системную службу. Обычного прокси для разморозки недостаточно.").font(.caption)
                 TextField("TCP-порт локального HTTP-прокси VPN", value: bind(\.guard.proxy_port), format: .number.grouping(.never))
                 Text("При тайм-ауте процессы завершаются принудительно в замороженном состоянии. Несохранённая работа может быть потеряна.").font(.caption)
                 Picker("Если разрешённый IP не появился", selection: bind(\.guard.grace)) {
@@ -368,7 +368,7 @@ struct ProtectionView: View {
                 } else { Text("Эта сборка не подписана для активации системного фильтра.").foregroundStyle(.secondary) }
             }
             Section("Защищённый запуск Claude Code") {
-                Text("Команда для Terminal ограничивает сетевые соединения CLI и его потомков локальным прокси с момента запуска.")
+                Text("Команда для Terminal требует действующего локального HTTP-прокси. Режим incy TUN сам по себе разрешения для этой команды не выдаёт.")
                 Text("\"\(Bundle.main.bundlePath)/Contents/MacOS/dozor-run\" \(m.cfg.guard.proxy_port) \"$(command -v claude)\"").textSelection(.enabled).font(.system(.caption, design: .monospaced))
             }
         }

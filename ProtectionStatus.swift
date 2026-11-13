@@ -65,8 +65,12 @@ extension Monitor {
         case .holding:
             var parts = ["Заморожено процессов: \(frozen.count)."]
             if paused && guardActive { parts.append("Новые процессы могут работать.") }
-            if cfg.guard.vpn_service_id.isEmpty { parts.append("Для разморозки укажите системную службу VPN.") }
-            else { parts.append("Для разморозки нужно подтвердить VPN и маршрут.") }
+            if case .error(let reason) = state { parts.append(reason) }
+            else if case .mismatch = state { parts.append(state.title) }
+            else if let reason = routeIssue { parts.append(reason) }
+            else if case .ok = state, cfg.guard.vpn_service_id.isEmpty && verifiedTunnel == nil {
+                parts.append("Для разморозки нужен активный TUN incy или выбранная системная служба VPN.")
+            } else { parts.append("Дозор подтверждает VPN и разрешённые выходные адреса.") }
             return parts.joined(separator: " ")
         case .blocked:
             if let cfgError { return cfgError }

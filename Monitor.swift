@@ -65,9 +65,28 @@ final class Monitor: ObservableObject {
     let processGuard: ProcessGuard
     init(processGuard: ProcessGuard = ProcessGuard(stateURL: frozenURL)) { self.processGuard = processGuard }
     private var lastProxyUp: Bool?
+    var readIncyTunnel: () -> IncyTunnel? = IncyTunnel.current
+    private(set) var roundTunnel: IncyTunnel?
+    private(set) var verifiedTunnel: IncyTunnel?
+    private var lastFailure: String?
+    private var roundTimeout: DispatchWorkItem?
+    func beginRouteRound() -> Int {
+        checking = true; proofStarted = Date(); networkGeneration += 1
+        roundTunnel = cfg.guard.vpn_service_id.isEmpty ? readIncyTunnel() : nil
+        return networkGeneration
+    }
+    private func failRound(_ reason: String, state failureState: NetState? = nil) {
+        invalidateProof()
+        state = failureState ?? .error(reason)
+        routeSummary = reason
+        if lastFailure != reason { log("Проверка сети: " + reason); lastFailure = reason }
+        enforce()
+    }
+
     var proofStarted = Date.distantPast
     func clearLaunchPermit() { setLaunchPermit(cfg.guard.proxy_port, nil) }
     func invalidateProof() {
+        roundTimeout?.cancel(); roundTimeout = nil; verifiedTunnel = nil; roundTunnel = nil
         verifiedAt = nil; confirmedRoutes = []; state = .checking; networkGeneration += 1; checking = false
         checkTasks.forEach { $0.cancel() }; checkTasks.removeAll()
         clearLaunchPermit()
@@ -86,7 +105,15 @@ final class Monitor: ObservableObject {
         guard !id.isEmpty, let c = SCNetworkConnectionCreateWithServiceID(nil,id as CFString,nil,nil) else { return false }
         return SCNetworkConnectionGetStatus(c) == .connected
     }
-    var mayThaw: Bool { vpnConnected(cfg.guard.vpn_service_id) }
+    var mayThaw: Bool {
+        if !cfg.guard.vpn_service_id.isEmpty { return vpnConnected(cfg.guard.vpn_service_id) }
+        guard let expected = verifiedTunnel else { return false }
+        return readIncyTunnel() == expected
+    }
+    private func transportAvailable() -> Bool {
+        if let expected = verifiedTunnel ?? roundTunnel { return readIncyTunnel() == expected }
+        return proxyAcceptsConnections(cfg.guard.proxy_port)
+    }
     var routeIssue: String? {
         confirmedRoutes.first { !permittedIP($0) }.map { "Выход \($0) отсутствует в разрешённых IP" }
     }
@@ -119,16 +146,35 @@ final class Monitor: ObservableObject {
         return values.count == 1 && isValidIP(values[0]) ? values[0] : nil
     }
 
-    static func checkClaudeRoute(host: String, port: Int) -> String? {
+    struct TraceReply {
+        let ip: String?
+        let failure: String?
+    }
+
+    static func checkClaudeRoute(host: String, port: Int, tunnel: IncyTunnel?) -> TraceReply {
         let task = Process(), output = Pipe()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
         task.environment = ["PATH": "/usr/bin:/bin"]
-        task.arguments = ["-q", "--silent", "--fail", "--max-time", "4", "--max-filesize", "16384",
-                          "--noproxy", "", "--proxy", "http://127.0.0.1:\(port)", "https://\(host)/cdn-cgi/trace"]
-        task.standardOutput = output; task.standardError = FileHandle.nullDevice
-        guard (try? task.run()) != nil else { return nil }
+        var args = ["-q", "--silent", "--show-error", "--fail", "--max-time", "4", "--max-filesize", "16384"]
+        if let tunnel {
+            args += ["--ipv4", "--interface", tunnel.name, "--noproxy", "*"]
+        } else {
+            args += ["--noproxy", "", "--proxy", "http://127.0.0.1:\(port)"]
+        }
+        args += ["--write-out", "\n__route__%{http_code} %{http_connect} %{local_ip}", "https://\(host)/cdn-cgi/trace"]
+        task.arguments = args; task.standardOutput = output; task.standardError = FileHandle.nullDevice
+        guard (try? task.run()) != nil else { return TraceReply(ip:nil, failure:"Не удалось запустить проверку \(host)") }
         let data = output.fileHandleForReading.readDataToEndOfFile(); task.waitUntilExit()
-        return task.terminationStatus == 0 ? traceIP(String(decoding: data, as: UTF8.self)) : nil
+        let parts = String(decoding:data, as:UTF8.self).components(separatedBy:"\n__route__")
+        let metadata = parts.last?.split(separator:" ").map(String.init) ?? []
+        if metadata.prefix(2).contains("407") {
+            return TraceReply(ip:nil, failure:"Прокси на порту \(port) требует авторизацию (HTTP 407)")
+        }
+        guard task.terminationStatus == 0, parts.count == 2, metadata.count == 3, metadata[0] == "200",
+              tunnel.map({ $0.address == metadata[2] }) ?? true, let ip = traceIP(parts[0]) else {
+            return TraceReply(ip:nil, failure:"Не подтверждён выход к \(host)")
+        }
+        return TraceReply(ip:ip, failure:nil)
     }
     @Published var routeSummary = "Маршруты ещё не проверены"
     var confirmedRoutes: [String] = []
@@ -323,10 +369,14 @@ final class Monitor: ObservableObject {
     func checkNow() {
         if checking { return }
         if !online { invalidateProof(); state = .offline; enforce(); return }
-        checking = true
-        proofStarted = Date()
-        networkGeneration += 1
-        let generation = networkGeneration
+        let generation = beginRouteRound()
+        let tunnel = roundTunnel
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self, self.checking, self.networkGeneration == generation else { return }
+            self.failRound("Проверка маршрута превысила 8 секунд")
+        }
+        roundTimeout = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: timeout)
         var seenHosts = Set<String>()
         let services = cfg.ip_services.compactMap(URL.init(string:)).filter { url in
             guard url.scheme?.lowercased() == "https", let host = url.host?.lowercased(), url.user == nil, url.password == nil else { return false }
@@ -340,14 +390,16 @@ final class Monitor: ObservableObject {
         var traceRoutes: [String: String] = [:]
         let needsClaude = guardActive || !processGuard.records.isEmpty
         let proxyPort = cfg.guard.proxy_port
-        let requireV6 = pathMonitor.currentPath.supportsIPv6
+        let requireV6 = tunnel == nil ? pathMonitor.currentPath.supportsIPv6 : IncyTunnel.defaultInterface(AF_INET6) != nil
+        var traceFailures: [String] = []
         for host in needsClaude ? Self.claudeHosts : [] {
             group.enter()
             DispatchQueue.global(qos: .utility).async {
                 defer { group.leave() }
-                if let ip = Self.checkClaudeRoute(host: host, port: proxyPort) {
-                    lock.lock(); traceRoutes[host] = ip; lock.unlock()
-                }
+                let result = Self.checkClaudeRoute(host: host, port: proxyPort, tunnel: tunnel)
+                lock.lock(); defer { lock.unlock() }
+                if let ip = result.ip { traceRoutes[host] = ip }
+                if let reason = result.failure { traceFailures.append(reason) }
             }
         }
         func fetch(_ url: URL, using session: URLSession, primary: Bool, ipv6: Bool = false) {
@@ -376,19 +428,32 @@ final class Monitor: ObservableObject {
             guard let self, generation == self.networkGeneration else { return }
             self.checkTasks.removeAll()
             self.lastCheck = Date()
-            self.handleAnswers(answers, additionalRoutes: extraRoutes, ipv6Confirmed: ipv6Confirmed, generation: generation, traceRoutes: traceRoutes, systemSeen: observedSystemRoute, requireV6: requireV6)
+            self.handleAnswers(answers, additionalRoutes: extraRoutes, ipv6Confirmed: ipv6Confirmed, generation: generation, traceRoutes: traceRoutes, systemSeen: observedSystemRoute, requireV6: requireV6, traceFailure: traceFailures.sorted().first)
         }
     }
 
-    func handleAnswers(_ answers: [String], additionalRoutes: [String] = [], ipv6Confirmed: Bool = false, generation: Int? = nil, traceRoutes: [String: String] = [:], systemSeen: Bool = false, requireV6: Bool = false) {
+    func handleAnswers(_ answers: [String], additionalRoutes: [String] = [], ipv6Confirmed: Bool = false, generation: Int? = nil, traceRoutes: [String: String] = [:], systemSeen: Bool = false, requireV6: Bool = false, traceFailure: String? = nil) {
         let token = generation ?? networkGeneration
         guard token == networkGeneration, checking else { return }
-        guard (!(guardActive || !processGuard.records.isEmpty) || proxyAcceptsConnections(cfg.guard.proxy_port)), online, cfgError == nil, (0...8).contains(Date().timeIntervalSince(proofStarted)) else {
-            invalidateProof(); state = online ? .checking : .offline; enforce(); return
+        roundTimeout?.cancel(); roundTimeout = nil
+        guard online else { failRound("Нет подключения к сети", state: .offline); return }
+        if let cfgError { failRound(cfgError); return }
+        guard (0...8).contains(Date().timeIntervalSince(proofStarted)) else { failRound("Ответ проверки устарел"); return }
+        let guarded = guardActive || !processGuard.records.isEmpty
+        if guarded {
+            if let tunnel = roundTunnel {
+                guard readIncyTunnel() == tunnel else { failRound("Туннель incy изменился во время проверки"); return }
+            } else if !proxyAcceptsConnections(cfg.guard.proxy_port) {
+                failRound("Локальный прокси VPN недоступен"); return
+            }
         }
         let counts = Dictionary(answers.filter(isValidIP).map { ($0, 1) }, uniquingKeysWith: +)
-        if (guardActive || !processGuard.records.isEmpty) && (!Self.claudeHosts.allSatisfy({ traceRoutes[$0].map(isValidIP) == true }) || !systemSeen || (requireV6 && !ipv6Confirmed)) {
-            state = .error("Не подтверждён маршрут Claude, системного прокси или доступного IPv6")
+        if guarded && !Self.claudeHosts.allSatisfy({ traceRoutes[$0].map(isValidIP) == true }) {
+            state = .error(traceFailure ?? "Не подтверждён маршрут к Claude")
+        } else if guarded && !systemSeen {
+            state = .error("Не получен IP через системный маршрут")
+        } else if guarded && requireV6 && !ipv6Confirmed {
+            state = .error("Доступен маршрут IPv6, но его выход не подтверждён")
         } else if counts.isEmpty {
             state = online ? .error("прямой выход: сервисы IP не отвечают") : .offline
         } else if counts.count > 1 {
@@ -397,10 +462,12 @@ final class Monitor: ObservableObject {
         } else if let first = counts.first, first.value >= (guardActive || !processGuard.records.isEmpty ? max(2,cfg.min_agree) : cfg.min_agree) {
             let ip = first.key
             let routes = Array(Set([ip] + additionalRoutes.filter(isValidIP) + Array(traceRoutes.values))).sorted()
+            verifiedTunnel = roundTunnel; lastFailure = nil
+            if verifiedTunnel != nil { clearLaunchPermit() }
             confirmedRoutes = routes
             checking = false
             verifiedAt = ProcessInfo.processInfo.systemUptime
-            routeSummary = "Проверенные выходы: " + routes.joined(separator: ", ") + (guardActive || !processGuard.records.isEmpty ? " · маршруты Claude проверены" : "")
+            routeSummary = (verifiedTunnel.map { "incy TUN (\($0.name)) · " } ?? "") + "Проверенные выходы: " + routes.joined(separator: ", ") + (guardActive || !processGuard.records.isEmpty ? " · маршруты Claude проверены" : "")
             state = .ok(ip: ip, country: countryCache[ip])
             if lastIP != ip { lastIP = ip; log("IP: \(ip)") }
             enforce(freshGeneration: token)
@@ -412,9 +479,7 @@ final class Monitor: ObservableObject {
         } else {
             state = .error("мало независимых подтверждений прямого IP")
         }
-        invalidateProof()
-        routeSummary = "Не удалось подтвердить разрешённые выходы"
-        enforce()
+        failRound(state.title, state: state)
     }
 
     func lookupCountry(_ ip: String, done: @escaping (String?) -> Void) {
@@ -484,8 +549,8 @@ final class Monitor: ObservableObject {
               !confirmedRoutes.isEmpty, confirmedRoutes.contains(ip) else { return (false, "Требуется свежая проверка VPN") }
         if !cfg.guard.vpn_service_id.isEmpty && !mayThaw { return (false, "Служба VPN не подключена") }
         if let issue = routeIssue { return (false, issue) }
-        guard proxyUp ?? proxyAcceptsConnections(cfg.guard.proxy_port) else { return (false, "Локальный прокси VPN недоступен") }
-        return (true, "Прокси доступен, выходные IP подтверждены")
+        guard proxyUp ?? transportAvailable() else { return (false, "Локальный прокси VPN недоступен") }
+        return (true, verifiedTunnel == nil ? "Прокси доступен, выходные IP подтверждены" : "Туннель incy и выходные IP подтверждены")
     }
 
     func matchedApps() -> [NSRunningApplication] {
@@ -506,10 +571,14 @@ final class Monitor: ObservableObject {
             clearLaunchPermit()
             return
         }
-        let up = proxyAcceptsConnections(cfg.guard.proxy_port) && (cfg.guard.vpn_service_id.isEmpty || mayThaw)
+        let up = transportAvailable() && (cfg.guard.vpn_service_id.isEmpty || mayThaw)
         if !up && lastProxyUp != false {
+            let lostTunnel = (verifiedTunnel ?? roundTunnel) != nil
+            let reason = lostTunnel ? "Туннель incy отключён или изменился" :
+                (cfg.guard.vpn_service_id.isEmpty ? "Локальный прокси VPN недоступен" : "Системная служба VPN или её прокси недоступны")
             invalidateProof()
-            state = .error("Локальный прокси VPN недоступен")
+            state = .error(reason)
+            routeSummary = reason
         }
         lastProxyUp = up
         let verdict = decision(proxyUp: up)
@@ -518,19 +587,19 @@ final class Monitor: ObservableObject {
         if verdict?.allowed == true && (processGuard.records.isEmpty || mayThaw) {
             // Only the completion of a new end-to-end check may send SIGCONT.
             if let generation = freshGeneration, generation == networkGeneration {
-                if guardActive && !paused && cfg.guard.apps.contains(where: {
+                if verifiedTunnel == nil && guardActive && !paused && cfg.guard.apps.contains(where: {
                     [claudeCLITarget, "com.anthropic.claude-code-url-handler"].contains($0.lowercased())
                 }) { setLaunchPermit(cfg.guard.proxy_port, proofStarted.addingTimeInterval(10)) }
                 if !processGuard.records.isEmpty {
                     let heldBeforeRelease = processGuard.records
                     var lostProof = false
                     processGuard.resumeVerified {
-                        let allowed = self.mayThaw && self.proxyAcceptsConnections(self.cfg.guard.proxy_port) && generation == self.networkGeneration
+                        let allowed = generation == self.networkGeneration && self.mayThaw && (self.verifiedTunnel != nil || self.transportAvailable())
                         if !allowed { lostProof = true }
                         return allowed
                     }
                     frozen = processGuard.names
-                    if lostProof || !mayThaw || !proxyAcceptsConnections(cfg.guard.proxy_port) {
+                    if lostProof || !mayThaw || !transportAvailable() {
                         invalidateProof(); lastProxyUp = false; state = .error("Локальный прокси VPN недоступен")
                         for (pid, rec) in heldBeforeRelease where rec.identity.isCurrent { processGuard.records[pid] = rec }
                         freezeMatched(reason: state.title); return
