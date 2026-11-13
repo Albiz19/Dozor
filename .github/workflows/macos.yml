@@ -1,0 +1,15 @@
+name: macOS
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  build-and-test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build the app and verify the bundle
+        run: ./build.sh
+      - name: Test processes, sockets, Telegram and update detection
+        run: python3 tests/run.py

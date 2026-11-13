@@ -1,0 +1,17 @@
+.DS_Store
+*.app/
+dist/
+.build/
+DerivedData/
+__pycache__/
+backups/
+*.log
+.env
+.env.*
+*.p12
+*.mobileprovision
+*.provisionprofile
+config.json
+frozen.json
+latency.json
+cli.permit
