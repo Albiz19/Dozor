@@ -8,7 +8,7 @@ cask "dozor" do
   homepage "https://github.com/Albiz19/Dozor"
 
   depends_on arch: :arm64
-  depends_on macos: ">= :ventura"
+  depends_on macos: :ventura
 
   app "Dozor.app"
 end
