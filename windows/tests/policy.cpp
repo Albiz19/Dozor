@@ -1,6 +1,6 @@
 #include "../policy.hpp"
 #include <algorithm>
-#include <cassert>
+#include <cstdlib>
 #include <cstdio>
 #include <vector>
 
@@ -22,11 +22,11 @@ int main() {
         for (auto rule : rules) {
             if (rule.family != family || (!session && !rule.persistent)) continue;
             if (rule.matchVpnInterfaces && (local != 1 || next != 1)) continue;
-            assert((rule.action == Action::permit) == (session && local == 1 && next == 1));
+            if ((rule.action == Action::permit) != (session && local == 1 && next == 1)) return EXIT_FAILURE;
             matched = true;
             break;
         }
-        assert(matched);
+        if (!matched) return EXIT_FAILURE;
         ++scenarios;
     }
     std::printf("PASS: %u IPv4/IPv6 policy scenarios\n", scenarios);
