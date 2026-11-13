@@ -41,6 +41,11 @@ final class Monitor: ObservableObject {
     @Published var online = true
     @Published var interfaces: [String] = []
     @Published var events: [String] = []
+    struct GuardDecision: Equatable {
+        let allowed: Bool
+        let reason: String
+    }
+    @Published private(set) var guardDecision: GuardDecision?
     @Published var paused = false
     @Published var frozen: [pid_t: String] = [:]   // pid -> имя приложения
     @Published var latency: [String: [[Double]]] = [:] // имя -> [[unix-время, мс]]
@@ -496,7 +501,11 @@ final class Monitor: ObservableObject {
     }
 
     func enforce(freshGeneration: Int? = nil) {
-        guard guardActive || !processGuard.records.isEmpty else { clearLaunchPermit(); return }
+        guard guardActive || !processGuard.records.isEmpty else {
+            if guardDecision != nil { guardDecision = nil }
+            clearLaunchPermit()
+            return
+        }
         let up = proxyAcceptsConnections(cfg.guard.proxy_port) && (cfg.guard.vpn_service_id.isEmpty || mayThaw)
         if !up && lastProxyUp != false {
             invalidateProof()
@@ -504,6 +513,8 @@ final class Monitor: ObservableObject {
         }
         lastProxyUp = up
         let verdict = decision(proxyUp: up)
+        let observed = verdict.map { GuardDecision(allowed: $0.allowed, reason: $0.reason) }
+        if observed != guardDecision { guardDecision = observed }
         if verdict?.allowed == true && (processGuard.records.isEmpty || mayThaw) {
             // Only the completion of a new end-to-end check may send SIGCONT.
             if let generation = freshGeneration, generation == networkGeneration {

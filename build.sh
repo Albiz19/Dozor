@@ -10,7 +10,7 @@ trap 'rm -rf "$BUILD_TMP"' EXIT
 rm -rf $APP
 mkdir -p $APP/Contents/MacOS $APP/Contents/Resources
 swiftc -O -file-prefix-map "$PWD"=. -swift-version 5 -target arm64-apple-macos13.0 \
-  main.swift Telegram.swift ReleaseUpdates.swift Core.swift ProcessGuard.swift Monitor.swift UI.swift FilterController.swift \
+  main.swift Telegram.swift ReleaseUpdates.swift Core.swift ProcessGuard.swift Monitor.swift ProtectionStatus.swift UI.swift FilterController.swift \
   -o $APP/Contents/MacOS/Dozor -framework AppKit -framework SwiftUI -framework Charts -framework Network -framework SystemConfiguration
 
 clang -O2 -arch arm64 -ffile-prefix-map="$PWD"=. -Wall -Werror -mmacosx-version-min=13 GuardedLaunch.c -o $APP/Contents/MacOS/dozor-run

@@ -12,12 +12,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     let menu = NSMenu()
     var window: NSWindow?
+    private var statusSymbol = ""
     var bag: Set<AnyCancellable> = []
 
     func applicationDidFinishLaunching(_ n: Notification) {
         NSApp.applicationIconImage = makeAppIcon(size: 512)
-        statusItem.button?.image = NSImage(systemSymbolName: "network", accessibilityDescription: "Дозор")
-        statusItem.button?.image?.isTemplate = true
+        statusItem.button?.font = .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .medium)
         statusItem.button?.imagePosition = .imageLeading
         menu.delegate = self
         statusItem.menu = menu
@@ -63,49 +63,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     func updateStatusItem() {
         guard let b = statusItem.button else { return }
-        var text = ""
-        let mode = m.cfg.menubar
-        switch m.state {
-        case .ok(let ip, let cc):
-            let f = cc.map(flag) ?? "🌐"
-            text = mode == "icon" ? "" : mode == "country" ? f : "\(f) \(ip)"
-        case .checking: text = mode == "icon" ? "" : "…"
-        case .offline: text = "нет сети"
-        case .mismatch: text = "⚠︎ разные IP"
-        case .error: text = mode == "icon" ? "" : "⚠︎"
+        let state = m.protectionStatus
+        if statusSymbol != state.symbol {
+            statusSymbol = state.symbol
+            b.image = NSImage(systemSymbolName: state.symbol, accessibilityDescription: nil)
+            b.image?.isTemplate = true
         }
-        if m.paused { text = "Пауза " + text }; if !m.frozen.isEmpty { text = "❄︎ " + text }
-        let t = text.isEmpty ? "" : " " + text
-        if b.title != t { b.title = t }
+        var parts: [String] = []
+        if m.cfg.menubar != "icon" {
+            if let cc = m.state.country { parts.append(flag(cc)) }
+            if m.cfg.menubar != "country", let ip = m.state.ip { parts.append(ip) }
+            if m.state == .offline { parts.append("Нет сети") }
+        }
+        let title = parts.isEmpty ? "" : " " + parts.joined(separator: " ")
+        if b.title != title { b.title = title }
+        let description = ["Дозор", state.title, m.state.ip ?? m.state.title].joined(separator: ". ")
+        b.toolTip = description
+        b.setAccessibilityLabel(description)
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
-        func info(_ s: String) { let i = NSMenuItem(title: s, action: nil, keyEquivalent: ""); i.isEnabled = false; menu.addItem(i) }
-        func item(_ s: String, _ sel: Selector, on: Bool = false, key: String = "") {
-            let i = NSMenuItem(title: s, action: sel, keyEquivalent: key); i.target = self
-            i.state = on ? .on : .off; menu.addItem(i)
-        }
-
-        switch m.state {
-        case .ok(let ip, let cc):
-            info("IP: \(ip)")
-            if let cc { info("Страна: \(flag(cc)) \(countryName(cc))") }
-        default: info(m.state.title)
-        }
-        if (m.guardActive || !m.frozen.isEmpty), let d = m.decision() {
-            info(!m.frozen.isEmpty ? "Удерживается заморозка" : d.allowed ? "Приложения работают: \(d.reason)" : "Выход запрещён: \(d.reason)")
-        }
-        if !m.frozen.isEmpty { info("❄︎ " + Set(m.frozen.values).sorted().joined(separator: ", ")) }
-
+        let header = NSHostingView(rootView: StatusMenuHeader(m: m))
+        header.frame.size = header.fittingSize
+        let summary = NSMenuItem()
+        summary.view = header
+        menu.addItem(summary)
         menu.addItem(.separator())
-        item("Открыть Дозор", #selector(openMain), key: "o")
-        item("Выбрать приложения…", #selector(openProtection))
-        if m.guardActive { item("Пауза блокировки", #selector(togglePause), on: m.paused) }
-        item("Проверить сейчас", #selector(checkNow), key: "r")
-        item("Настройки…", #selector(openSettings), key: ",")
+
+        func item(_ title: String, _ symbol: String, _ action: Selector, key: String = "") {
+            let entry = NSMenuItem(title: title, action: action, keyEquivalent: key)
+            entry.target = self
+            entry.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+            menu.addItem(entry)
+        }
+        item("Открыть Дозор", "macwindow", #selector(openMain), key: "o")
+        item("Настроить блокировку…", "slider.horizontal.3", #selector(openProtection))
+        if m.guardActive {
+            item(m.pauseActionTitle, m.paused ? "play.circle" : "pause.circle", #selector(togglePause))
+        }
+        item("Проверить сеть", "arrow.clockwise", #selector(checkNow), key: "r")
         menu.addItem(.separator())
-        item("Выйти", #selector(quit), key: "q")
+        item("Настройки…", "gearshape", #selector(openSettings), key: ",")
+        item("Выйти из Дозора", "power", #selector(quit), key: "q")
     }
 
     @objc func openMain() { showWindow() }

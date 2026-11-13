@@ -108,6 +108,8 @@ held("proxy off: delayed positive response and repeated enforcement send zero SI
 monitor.state = .ok(ip:ip,country:"AT"); monitor.verifiedAt = ProcessInfo.processInfo.systemUptime; monitor.confirmedRoutes = [ip]
 monitor.enforce(); held("cached approved IP cannot release tree with VPN off")
 monitor.togglePause(); held("pause sends zero SIGCONT")
+expect(monitor.protectionStatus == .holding && monitor.paused && monitor.pauseActionTitle == "Возобновить блокировку",
+       "paused controls still report the actual held processes")
 monitor.cfg.guard.enabled = false; monitor.enforce(); held("disabling sends zero SIGCONT")
 monitor.cfg.guard.apps = []; monitor.enforce(); held("deselecting sends zero SIGCONT")
 monitor.prepareForExit(); held("quit sends zero SIGCONT")
@@ -143,6 +145,10 @@ reply(m,begin(m)); held("selected VPN off, listener up, ALL probes positive: zer
 vpnUp = true; m.enforce(); held("VPN reconnected but no new probe: zero SIGCONT")
 reply(m,begin(m)); waitForStopped(false); usleep(180000)
 expect(continues == 3 && zip(heldBeats,beats()).allSatisfy { $0 != $1 }, "fresh full proof resumes all three; each heartbeat advances")
+expect(m.protectionStatus == .watching, "fresh guard decision is shown as active")
+m.state = .offline
+expect(m.protectionStatus == .blocked, "old positive verdict cannot mask an offline UI state")
+m.state = .ok(ip:ip,country:"AT")
 let stale = ProcessIdentity(pid:root.identity.pid,seconds:root.identity.seconds,microseconds:root.identity.microseconds+1)
 expect(!stale.send(SIGSTOP), "stale PID identity rejected")
 m.processGuard.records[root.identity.pid] = FrozenProcess(identity:stale,name:"stale",depth:0)

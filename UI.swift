@@ -260,17 +260,10 @@ struct OverviewView: View {
     }
 
     @ViewBuilder var guardSummary: some View {
-        if !m.guardActive {
-            Text(m.cfg.guard.enabled ? "Не выбрано ни одного приложения" : "Выключена").foregroundStyle(.secondary)
-            Button("Настроить") { nav.section = .protection }.buttonStyle(.link)
-        } else if m.paused {
-            Pill(text: "На паузе", color: .orange)
-            Button("Снять паузу") { m.togglePause() }
-        } else if let d = m.decision() {
-            Pill(text: !m.frozen.isEmpty ? "Удерживается заморозка" : d.allowed ? "Приложения работают" : "Выход запрещён", color: d.allowed ? .green : .blue)
-            Text(d.reason).font(.callout).foregroundStyle(.secondary)
-            row("Под защитой", "\(m.cfg.guard.apps.count) прил.")
-        }
+        let state = m.protectionStatus
+        Label(state.title, systemImage: state.symbol).font(.headline).foregroundStyle(state.color)
+        Text(m.protectionDetail).font(.callout).foregroundStyle(.secondary)
+        Button("Настроить блокировку") { nav.section = .protection }.buttonStyle(.link)
     }
 
     func row(_ k: String, _ v: String) -> some View {
@@ -289,61 +282,55 @@ struct ProtectionView: View {
     @StateObject var catalog = AppCatalogModel()
     @State var showPicker = false
     @StateObject var systemFilter = FilterController()
-    @State var newCountry = ""
+    @State private var showRoutes = false
     @State var newIP = ""
 
     var body: some View {
         Form {
             Section {
-                Toggle("Блокировать выбранные приложения", isOn: bind(\.guard.enabled))
-                if m.guardActive {
-                    Toggle("Пауза", isOn: Binding(get: { m.paused }, set: { if $0 != m.paused { m.togglePause() } }))
-                }
-                if (m.guardActive || !m.frozen.isEmpty), let d = m.decision() {
-                    HStack {
-                        Pill(text: !m.frozen.isEmpty ? "Удерживается заморозка" : d.allowed ? "Работают" : "Выход запрещён", color: d.allowed ? .green : .blue)
-                        Text(d.reason).foregroundStyle(.secondary)
-                    }
-                }
-            } footer: {
-                Text("Пока выход в сеть не разрешён, выбранные приложения и их дочерние процессы замораживаются. Это приостановка процессов, а не сетевой фильтр.")
-                Text(m.routeSummary).font(.caption)
-                if let issue = m.routeIssue { Text(issue).foregroundStyle(.red) }
+                ProtectionControls(m: m)
             }
 
-            Section("Системный сетевой фильтр") {
-                Text("Для выбранных приложений разрешает только TCP к локальному порту VPN. Изменив список или порт, примените правила заново. Для ранее открытых соединений перезапустите защищаемые приложения.")
-                if systemFilter.canInstall {
-                    Button("Применить правила в macOS") { systemFilter.apply(m.cfg.guard) }.disabled(systemFilter.busy || m.cfg.guard.apps.isEmpty)
-                    Text(systemFilter.status)
-                } else { Text("Эта сборка не подписана для активации системного фильтра.").foregroundStyle(.secondary) }
-            }
-            Section("Защищённый запуск Claude Code") {
-                Text("Команда для Terminal ограничивает сетевые соединения CLI и его потомков локальным прокси с момента запуска.")
-                Text("\"\(Bundle.main.bundlePath)/Contents/MacOS/dozor-run\" \(m.cfg.guard.proxy_port) \"$(command -v claude)\"").textSelection(.enabled).font(.system(.caption, design: .monospaced))
-            }
-            Section("Приложения") {
+            Section("Выбранные приложения · \(m.cfg.guard.apps.count)") {
                 if m.cfg.guard.apps.isEmpty {
-                    Text("Ничего не выбрано").foregroundStyle(.secondary)
+                    Text("Добавьте приложения для автоматической блокировки.").foregroundStyle(.secondary)
                 }
                 ForEach(m.cfg.guard.apps, id: \.self) { p in
                     let r = AppCatalog.resolve(p, in: catalog.apps)
                     HStack {
-                        if let i = r.icon { Image(nsImage: i) } else { Image(systemName: "app.dashed").frame(width: 32) }
+                        if p == claudeCLITarget {
+                            Image(systemName: "terminal.fill").font(.title2).frame(width: 32, height: 32)
+                        } else if let i = r.icon { Image(nsImage: i) }
+                        else { Image(systemName: "app.dashed").frame(width: 32) }
                         VStack(alignment: .leading) {
                             Text(r.name)
-                            if r.name != p { Text(p).font(.caption).foregroundStyle(.secondary) }
+                            if p == claudeCLITarget { Text("Командная строка и дочерние процессы").font(.caption).foregroundStyle(.secondary) }
+                            else if r.name != p { Text(p).font(.caption).foregroundStyle(.secondary) }
                         }
                         Spacer()
                         Button(role: .destructive) { m.updateConfig { $0.guard.apps.removeAll { $0 == p } } } label: {
                             Image(systemName: "minus.circle.fill").foregroundStyle(.red)
                         }.buttonStyle(.plain)
+                         .accessibilityLabel("Убрать из списка: \(r.name)")
                     }
                 }
                 Button { showPicker = true } label: { Label("Выбрать приложения…", systemImage: "plus.circle") }
             }
 
             Section {
+                DisclosureGroup("Последняя проверка маршрутов", isExpanded: $showRoutes) {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(m.state.title)
+                        if !m.confirmedRoutes.isEmpty {
+                            ForEach(m.confirmedRoutes, id: \.self) { ip in
+                                Label(ip, systemImage: m.permittedIP(ip) ? "checkmark.circle" : "exclamationmark.circle")
+                                    .font(.system(.callout, design: .monospaced))
+                                    .accessibilityLabel(ip + (m.permittedIP(ip) ? " разрешён" : " отсутствует в списке"))
+                            }
+                        }
+                        if let issue = m.routeIssue { Text(issue).foregroundStyle(.red) }
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                }
                 chips(m.cfg.guard.allow.ips, label: { $0 }) { ip in
                     m.updateConfig { $0.guard.allow.ips.removeAll { $0 == ip } }
                 }
@@ -364,7 +351,7 @@ struct ProtectionView: View {
                 TextField("TCP-порт локального HTTP-прокси VPN", value: bind(\.guard.proxy_port), format: .number.grouping(.never))
                 Text("При тайм-ауте процессы завершаются принудительно в замороженном состоянии. Несохранённая работа может быть потеряна.").font(.caption)
                 Picker("Если разрешённый IP не появился", selection: bind(\.guard.grace)) {
-                    Text("Только держать на паузе").tag(0.0)
+                    Text("Оставить замороженными").tag(0.0)
                     Text("Закрыть через 1 минуту").tag(60.0)
                     Text("Закрыть через 5 минут").tag(300.0)
                     Text("Закрыть через 15 минут").tag(900.0)
@@ -372,6 +359,17 @@ struct ProtectionView: View {
                         Text("Закрыть через \(Int(m.cfg.guard.grace)) с").tag(m.cfg.guard.grace)
                     }
                 }
+            }
+            Section("Системный сетевой фильтр") {
+                Text("Для выбранных приложений разрешает только TCP к локальному порту VPN. Изменив список или порт, примените правила заново. Для ранее открытых соединений перезапустите защищаемые приложения.")
+                if systemFilter.canInstall {
+                    Button("Применить правила в macOS") { systemFilter.apply(m.cfg.guard) }.disabled(systemFilter.busy || m.cfg.guard.apps.isEmpty)
+                    Text(systemFilter.status)
+                } else { Text("Эта сборка не подписана для активации системного фильтра.").foregroundStyle(.secondary) }
+            }
+            Section("Защищённый запуск Claude Code") {
+                Text("Команда для Terminal ограничивает сетевые соединения CLI и его потомков локальным прокси с момента запуска.")
+                Text("\"\(Bundle.main.bundlePath)/Contents/MacOS/dozor-run\" \(m.cfg.guard.proxy_port) \"$(command -v claude)\"").textSelection(.enabled).font(.system(.caption, design: .monospaced))
             }
         }
         .formStyle(.grouped)
@@ -395,13 +393,6 @@ struct ProtectionView: View {
                 }
             }
         }
-    }
-
-    func addCountry() {
-        let c = newCountry.trimmingCharacters(in: .whitespaces).uppercased()
-        guard c.count == 2, c.allSatisfy(\.isLetter), !m.cfg.guard.allow.countries.contains(c) else { return }
-        m.updateConfig { $0.guard.allow.countries.append(c) }
-        newCountry = ""
     }
 
     func addIP() {
