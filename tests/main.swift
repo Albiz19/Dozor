@@ -10,6 +10,21 @@ if CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "issue-permit
     exit(0)
 }
 
+if CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "local-redirect-check" {
+    guard let port = UInt16(CommandLine.arguments[2]) else { exit(1) }
+    let session = URLSession(configuration: .ephemeral)
+    for (path, status) in [("/redirect",302),("/ok",200)] {
+        let done = DispatchSemaphore(value:0)
+        let task = session.dataTask(with: URL(string:"http://127.0.0.1:\(port)\(path)")!) { _, r, err in
+            precondition(err == nil && (r as? HTTPURLResponse)?.statusCode == status)
+            done.signal()
+        }
+        task.delegate = ProbePolicy.shared; task.resume()
+        precondition(done.wait(timeout: .now()+4) == .success)
+    }
+    exit(0)
+}
+
 func expect(_ condition: @autoclosure () -> Bool, _ label: String) {
     precondition(condition(), label)
     print("PASS: \(label)")
@@ -19,15 +34,12 @@ try fm.createDirectory(at: supportDir, withIntermediateDirectories: true)
 let dir = supportDir.appendingPathComponent(UUID().uuidString)
 try fm.createDirectory(at: dir, withIntermediateDirectories: true)
 try testServices()
+testRouteGuard()
 let fixture = Process()
 fixture.executableURL = supportDir.deletingLastPathComponent().appendingPathComponent("dozor-test-worker")
 fixture.arguments = [dir.path]
 try fixture.run()
 var fixturePIDs: [pid_t] = [fixture.processIdentifier]
-defer {
-    for pid in fixturePIDs { kill(pid, SIGKILL) }
-    fixture.waitUntilExit()
-}
 for _ in 0..<100 {
     if (0...2).allSatisfy({ fm.fileExists(atPath: dir.appendingPathComponent("level\($0).pid").path) }) { break }
     usleep(20000)
@@ -49,7 +61,19 @@ expect(ipMatches("2001:db8::123", rule: "2001:db8::/32"), "IPv6 CIDR matching")
 expect(ipMatches("2001:db8::1", rule: "2001:0db8:0:0:0:0:0:1"), "equivalent IPv6 spelling")
 expect(!ipMatches("2001:db9::1", rule: "2001:db8::/32") && !ipMatches("192.0.2.1", rule: "2001:db8::/0"), "different IPv6 subnet and address family rejected")
 expect(ipMatches("192.0.2.5", rule: "192.0.2.0/24") && !ipMatches("192.0.3.5", rule: "192.0.2.0/24"), "IPv4 CIDR still works")
+func isolate(_ m: Monitor) {
+    m.runningApplications = { [] }; m.applicationURL = { _ in nil }
+    m.processGuard.snapshotProcesses = {
+        Dictionary(uniqueKeysWithValues: fixturePIDs.compactMap(LocalProcess.read).map { ($0.identity.pid,$0) })
+    }
+    m.readIPv6Route = { .absent }
+}
+expect(!isValidIP("192.0.2.1\0junk") && !ipMatches("192.0.2.1", rule:"192.0.2.0/+0"),
+       "malformed IP and CIDR cannot authorize an egress")
+expect(ProbePolicy.sources(["https://a.example/ip","https://A.EXAMPLE.:444/again","http://c.example","https://user:pass@b.example/ip","https://b.example/ip"]).count == 2,
+       "duplicate probe hosts, alternate ports, credentials and plain HTTP cannot inflate quorum")
 let monitor = Monitor()
+isolate(monitor)
 monitor.readIncyTunnel = { nil }
 monitor.cfg.notifications = false
 monitor.cfg.guard.enabled = true
@@ -116,6 +140,7 @@ monitor.cfg.guard.enabled = false; monitor.enforce(); held("disabling sends zero
 monitor.cfg.guard.apps = []; monitor.enforce(); held("deselecting sends zero SIGCONT")
 monitor.prepareForExit(); held("quit sends zero SIGCONT")
 let m = Monitor() // reads the same isolated persisted registry
+isolate(m)
 m.cfg.notifications = false; m.cfg.guard.enabled = true; m.cfg.guard.apps = ["dozor.test.uninstalled"]
 m.cfg.guard.allow.ips = [ip]; m.cfg.guard.allow.countries = ["AT"]
 m.proxyAcceptsConnections = { _ in proxyUp }; m.countryCache = monitor.countryCache
@@ -204,7 +229,7 @@ for _ in 0..<100 {
 }
 expect(continues == beforeKill && fixture.terminationReason == .uncaughtSignal && fixture.terminationStatus == SIGKILL, "grace timeout kills stopped fixture without SIGCONT")
 expect(fixturePIDs.allSatisfy({ pid in var i = proc_bsdinfo(); return proc_pidinfo(pid,PROC_PIDTBSDINFO,0,&i,Int32(MemoryLayout<proc_bsdinfo>.size)) <= 0 || i.pbi_status == 5 }), "entire timed-out tree exited")
-expect(AppCatalog.scan().contains { $0.id == claudeCLITarget }, "CLI available in picker")
+expect(AppCatalog.scan(roots: [dir.path], cliPaths: []).contains { $0.id == claudeCLITarget }, "CLI available in picker")
 let policy = FlowPolicy(port:10808)
 for host in ["api.anthropic.com", "CLAUDE.AI.", "claude.com", "files.claudeusercontent.com"] {
     expect(!policy.permits(protected:false,hostname:host,tcp:true,address:"192.0.2.9",destinationPort:443),"known vendor host blocked independently of process")

@@ -1,4 +1,5 @@
 """Exercise the shipped sandbox policy against TCP/UDP sinks on loopback only."""
+import http.server
 import errno
 import json
 import os
@@ -60,6 +61,22 @@ def workload(args):
         if child and child.poll() is None: child.kill(); child.wait()
 
 def suite(launcher, verifier):
+    paths=[]
+    class Witness(http.server.BaseHTTPRequestHandler):
+        def log_message(self,*args): pass
+        def do_GET(self):
+            paths.append(self.path)
+            self.send_response(302 if self.path == "/redirect" else 200)
+            if self.path == "/redirect": self.send_header("Location","/must-not-follow")
+            self.end_headers()
+    with http.server.HTTPServer(("127.0.0.1",0),Witness) as server:
+        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        try:
+            subprocess.run([verifier,"local-redirect-check",str(server.server_port)],check=True,timeout=12)
+            assert paths == ["/redirect","/ok"],paths
+        finally:
+            server.shutdown();thread.join()
+    print("PASS: HTTP witness redirect not followed; standalone 200 control succeeds",flush=True)
     with tempfile.TemporaryDirectory() as d:
         tmp=Path(d)
         sinks=[endpoint(f,k) for f in (socket.AF_INET,socket.AF_INET6) for k in (socket.SOCK_STREAM,socket.SOCK_DGRAM)]
@@ -100,8 +117,14 @@ def suite(launcher, verifier):
                     with s.accept()[0] as client: assert client.recv(8)==b"direct"
                 else: assert s.recv(8)==b"direct"
             print("PASS: all four unguarded TCP/UDP IPv4/IPv6 controls reach local sinks",flush=True)
+            # A socket on standard input must not survive into the launched job.
+            with socket.socketpair()[0] as supplied:
+                marker = tmp/"socket-inheritance"
+                assert subprocess.run([launcher,str(port),"/usr/bin/touch",str(marker)], stdin=supplied).returncode == 77 and not marker.exists()
+            print("PASS: launcher rejects a socket inherited as standard input",flush=True)
             threads=[threading.Thread(target=f,daemon=True) for f in (serve,receive)]
             for t in threads:t.start()
+            issuer.stdin.write("refresh\n"); issuer.stdin.flush(); assert issuer.stdout.readline().strip()=="ready"
             p=subprocess.Popen([launcher,str(port),sys.executable,__file__,"worker","0",str(port),json.dumps(ports),d])
             deadline=time.monotonic()+8
             while len(list(tmp.glob("ready*")))<3:

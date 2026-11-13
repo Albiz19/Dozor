@@ -25,7 +25,7 @@ struct IncyTunnel: Equatable {
               proc.kp_proc.p_stat != SSTOP, proc.kp_proc.p_stat != SZOMB,
               proc_pidpath(pid, &path, UInt32(path.count)) > 0,
               String(cString: path) == "/Applications/incy.app/Contents/app/resources/bin/xray",
-              let index = defaultInterface(AF_INET) else { return nil }
+              case .interface(let index) = defaultRoute(AF_INET) else { return nil }
         var head: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&head) == 0 else { return nil }; defer { freeifaddrs(head) }
         var node = head
@@ -48,12 +48,26 @@ struct IncyTunnel: Equatable {
     }
 
     /// Read the unscoped default route. A scoped Wi-Fi gateway or link-local utun alone is insufficient.
-    static func defaultInterface(_ family: Int32) -> UInt32? {
+    enum DefaultRoute: Equatable {
+        case absent
+        case interface(UInt32)
+        case unknown
+    }
+
+    static func defaultRoute(_ family: Int32) -> DefaultRoute {
         var mib = [CTL_NET, PF_ROUTE, 0, family, NET_RT_DUMP2, 0]
         var size = 0
-        guard sysctl(&mib, 6, nil, &size, nil, 0) == 0, size > 0 else { return nil }
+        guard family == AF_INET || family == AF_INET6,
+              sysctl(&mib, 6, nil, &size, nil, 0) == 0 else { return .unknown }
+        guard size > 0 else { return .absent }
         var data = [UInt8](repeating: 0, count: size)
-        guard sysctl(&mib, 6, &data, &size, nil, 0) == 0 else { return nil }
+        guard sysctl(&mib, 6, &data, &size, nil, 0) == 0 else { return .unknown }
+        guard size <= data.count else { return .unknown }
+        return parseDefaultRoute(data.prefix(size), family: family)
+    }
+
+    static func parseDefaultRoute(_ data: ArraySlice<UInt8>, family: Int32) -> DefaultRoute {
+        let size = data.count
         return data.withUnsafeBytes { buf in
             var offset = 0
             let headerSize = MemoryLayout<rt_msghdr2>.size
@@ -61,7 +75,7 @@ struct IncyTunnel: Equatable {
             while offset + headerSize <= size {
                 let h = buf.loadUnaligned(fromByteOffset: offset, as: rt_msghdr2.self)
                 let end = offset + Int(h.rtm_msglen)
-                guard end > offset, end <= size else { return nil }
+                guard end >= offset + headerSize, end <= size else { return .unknown }
                 defer { offset = end }
                 let skip = RTF_IFSCOPE | RTF_HOST | RTF_REJECT | RTF_BLACKHOLE
                 guard h.rtm_flags & RTF_UP != 0, h.rtm_flags & skip == 0, h.rtm_addrs & RTA_DST != 0,
@@ -69,9 +83,9 @@ struct IncyTunnel: Equatable {
                 var cursor = offset + headerSize
                 var isDefault = true
                 for i in 0...Int(RTAX_NETMASK) where h.rtm_addrs & (1 << i) != 0 {
-                    guard cursor + 2 <= end else { return nil }
+                    guard cursor + 2 <= end else { return .unknown }
                     let length = Int(buf[cursor])
-                    guard cursor + length <= end else { return nil }
+                    guard cursor + length <= end else { return .unknown }
                     if i == Int(RTAX_DST) {
                         let addrOffset = family == AF_INET ? 4 : 8
                         let bytes = family == AF_INET ? 4 : 16
@@ -84,7 +98,9 @@ struct IncyTunnel: Equatable {
                 }
                 if isDefault { candidates.insert(UInt32(h.rtm_index)) }
             }
-            return candidates.count == 1 ? candidates.first : nil
+            guard offset == size, candidates.count <= 1 else { return .unknown }
+            guard let index = candidates.first else { return .absent }
+            return index == 0 ? .unknown : .interface(index)
         }
     }
 }

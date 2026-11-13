@@ -110,6 +110,7 @@ struct FrozenProcess: Codable {
 final class ProcessGuard {
     let stateURL: URL
     var records: [pid_t: FrozenProcess] = [:]
+    var snapshotProcesses: () -> [pid_t: LocalProcess] = LocalProcess.snapshot
     var onError: ((String) -> Void)?
     init(stateURL: URL) { self.stateURL = stateURL }
     var names: [pid_t: String] { records.mapValues(\.name) }
@@ -160,19 +161,22 @@ final class ProcessGuard {
         // Roots are already stopped; now scan their children, stopping each parent before its children.
         // Previously frozen descendants remain roots here even after being reparented.
         for _ in 0..<2 {
-            let snapshot = LocalProcess.snapshot()
-            var queue = records.values.map { ($0.identity.pid, $0.name, $0.depth, $0.target) }
-            queue += roots.filter { $0.0.identity.isCurrent }.map { ($0.0.identity.pid, $0.1, 0, targets[$0.0.identity.pid]) }
+            let snapshot = snapshotProcesses()
+            var queue = records.values.map { ($0.identity, $0.name, $0.depth, $0.target) }
+            queue += roots.map { ($0.0.identity, $0.1, 0, targets[$0.0.identity.pid]) }
             var visited = Set<pid_t>()
             var children: [pid_t: [LocalProcess]] = [:]
             for p in snapshot.values { children[p.parent, default: []].append(p) }
             var index = 0
             while index < queue.count {
-                let (pid, name, depth, target) = queue[index]; index += 1
-                guard visited.insert(pid).inserted else { continue }
+                let (identity, name, depth, target) = queue[index]; index += 1
+                let pid = identity.pid
+                // Parentage by PID is meaningful only for the same process instance.
+                guard snapshot[pid]?.identity == identity, identity.isCurrent,
+                      visited.insert(pid).inserted else { continue }
                 for child in children[pid] ?? [] where child.identity.pid != me {
                     stop(child, name: name, depth: depth + 1, target: target)
-                    queue.append((child.identity.pid, name, depth + 1, target))
+                    queue.append((child.identity, name, depth + 1, target))
                 }
             }
         }

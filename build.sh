@@ -2,12 +2,17 @@
 # Сборка Dozor.app рядом со скриптом.
 set -e
 cd "$(dirname "$0")"
-APP=Dozor.app
+APP="${DOZOR_BUILD_DIR:-$PWD}/Dozor.app"
+if [[ -n "${DOZOR_BUILD_DIR:-}" && ( -e "$APP" || -L "$APP" ) ]]; then
+    echo "Для отдельной сборки укажите каталог без Dozor.app" >&2
+    exit 1
+fi
+mkdir -p "${APP:h}"
 RELEASE_VERSION=$(cat VERSION)
-BUILD_NUMBER=3
+BUILD_NUMBER=4
 BUILD_TMP=$(mktemp -d)
 trap 'rm -rf "$BUILD_TMP"' EXIT
-rm -rf $APP
+rm -rf -- "$APP"
 mkdir -p $APP/Contents/MacOS $APP/Contents/Resources
 swiftc -O -file-prefix-map "$PWD"=. -swift-version 5 -target arm64-apple-macos13.0 \
   main.swift Telegram.swift ReleaseUpdates.swift Core.swift ProcessGuard.swift IncyTunnel.swift Monitor.swift ProtectionStatus.swift UI.swift FilterController.swift \
@@ -46,4 +51,4 @@ cat > $APP/Contents/Info.plist <<PLIST
 </dict></plist>
 PLIST
 source ./package-filter.sh
-echo "Готово: $(pwd)/$APP"
+echo "Готово: $APP"

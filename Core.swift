@@ -180,6 +180,8 @@ func ipv4ToUInt(_ s: String) -> UInt32? {
 }
 
 func ipBytes(_ s: String) -> [UInt8]? {
+    // inet_pton consumes a C string: reject embedded NUL before bridging Swift input.
+    guard !s.isEmpty, s.utf8.count <= 45, !s.utf8.contains(0) else { return nil }
     var v4 = in_addr(), v6 = in6_addr()
     if s.withCString({ inet_pton(AF_INET, $0, &v4) }) == 1 { return withUnsafeBytes(of: &v4) { Array($0) } }
     if s.withCString({ inet_pton(AF_INET6, $0, &v6) }) == 1 { return withUnsafeBytes(of: &v6) { Array($0) } }
@@ -191,7 +193,7 @@ func ipMatches(_ ip: String, rule: String) -> Bool {
     guard (1...2).contains(parts.count), let address = ipBytes(ip), let network = ipBytes(String(parts[0])),
           address.count == network.count else { return false }
     if parts.count == 1 { return address == network }
-    guard let bits = Int(parts[1]), (0...address.count * 8).contains(bits) else { return false }
+    guard !parts[1].isEmpty, parts[1].utf8.allSatisfy({ (48...57).contains($0) }), let bits = Int(parts[1]), (0...address.count * 8).contains(bits) else { return false }
     for index in address.indices {
         let remaining = min(8, max(0, bits - index * 8))
         let mask: UInt8 = remaining == 0 ? 0 : UInt8(0xff << (8 - remaining) & 0xff)
@@ -201,3 +203,21 @@ func ipMatches(_ ip: String, rule: String) -> Bool {
 }
 
 func isValidIP(_ s: String) -> Bool { ipBytes(s) != nil }
+
+/// Only the configured HTTPS origin may attest an egress address. Redirects are
+/// not independent witnesses, even when the original URLs had different hosts.
+final class ProbePolicy: NSObject, URLSessionTaskDelegate {
+    static let shared = ProbePolicy()
+    static func sources(_ strings: [String]) -> [URL] {
+        var seen = Set<String>()
+        return strings.compactMap(URL.init(string:)).filter { url in
+            guard url.scheme?.lowercased() == "https", url.user == nil, url.password == nil,
+                  var host = url.host?.lowercased(), !host.isEmpty else { return false }
+            if host.hasSuffix(".") { host.removeLast() }
+            return !host.isEmpty && seen.insert(host).inserted
+        }
+    }
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
+                    completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
+}

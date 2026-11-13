@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Package an already tested macOS app and pin the Homebrew update to its SHA-256."""
+import os
 import hashlib
 import plistlib
 import re
@@ -10,7 +11,7 @@ root = Path(__file__).resolve().parents[1]
 version = (root / "VERSION").read_text().strip()
 if not re.fullmatch(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?", version):
     raise SystemExit("Expected a stable version such as 0.1 or 0.1.1")
-app = root / "Dozor.app"
+app = Path(os.environ.get("DOZOR_BUILD_DIR", root)) / "Dozor.app"
 extension = app / "Contents/Library/SystemExtensions/local.dozor.filter.systemextension"
 for bundle in (app, extension):
     with (bundle / "Contents/Info.plist").open("rb") as stream:

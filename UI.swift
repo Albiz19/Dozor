@@ -126,9 +126,9 @@ struct InstalledApp: Identifiable, Hashable {
 }
 
 enum AppCatalog {
-    static func scan() -> [InstalledApp] {
+    static func scan(roots overrideRoots: [String]? = nil, cliPaths overrideCLI: [String]? = nil) -> [InstalledApp] {
         let fm = FileManager.default
-        let roots = ["/Applications", "/System/Applications", "/System/Applications/Utilities",
+        let roots = overrideRoots ?? ["/Applications", "/System/Applications", "/System/Applications/Utilities",
                      "/Applications/Utilities", fm.homeDirectoryForCurrentUser.appendingPathComponent("Applications").path]
         var seen = Set<String>()
         var out: [InstalledApp] = []
@@ -153,7 +153,7 @@ enum AppCatalog {
                 }
             }
         }
-        let cliCandidates = ["/usr/local/bin/claude", "/opt/homebrew/bin/claude",
+        let cliCandidates = overrideCLI ?? ["/usr/local/bin/claude", "/opt/homebrew/bin/claude",
                              fm.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/claude").path,
                              fm.homeDirectoryForCurrentUser.appendingPathComponent(".claude/local/claude").path]
         let cliPath = cliCandidates.first { fm.isExecutableFile(atPath: $0) } ?? "/usr/local/bin/claude"
