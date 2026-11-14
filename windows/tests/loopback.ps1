@@ -62,6 +62,16 @@ function Check-Fixture([int]$Expected) {
         }
     }
 }
+function Check-Policy([string]$LockExpected, [bool]$PermitExpected) {
+    $report = @(& $Dozor status $fixture)
+    if ($LASTEXITCODE -ne 0) { throw "Could not read WFP policy for fixture" }
+    foreach ($family in @('IPv4', 'IPv6')) {
+        $expected = if ($PermitExpected) { 'luid:[1-9][0-9]* adapter=\{[0-9a-fA-F-]{36}\}' } else { 'none' }
+        if (@($report -match "^$family persistent-lock=$LockExpected permit=$expected unexpected=0$").Count -ne 1) {
+            throw "Unexpected WFP policy: $report"
+        }
+    }
+}
 function Change-Lock([string]$Command) {
     & $Dozor $Command $fixture
     if ($LASTEXITCODE -ne 0) { throw "Dozor $Command failed ($LASTEXITCODE)" }
@@ -74,11 +84,14 @@ try {
         $binding = New-Object Net.IPEndPoint($ip, 0)
         $udpReceivers += New-Object Net.Sockets.UdpClient($binding)
     }
+    Check-Policy 'no' $false
     Check-Fixture 0
     Change-Lock lock
     Change-Lock lock
+    Check-Policy 'yes' $false
     Check-Fixture 3
     Change-Lock unlock
+    Check-Policy 'no' $false
     Check-Fixture 0
 
     if ($FixtureController) {
@@ -93,10 +106,12 @@ try {
                 Start-Sleep -Milliseconds 100
             }
             if (!$ready) { throw 'Timed out waiting for the loopback permits' }
+            Check-Policy 'yes' $true
             Check-Fixture 0
             $controller.Kill()
             $controller.WaitForExit()
             Check-Fixture 3
+            Check-Policy 'yes' $false
         } finally {
             if ($controller -and !$controller.HasExited) { $controller.Kill(); $controller.WaitForExit() }
             Remove-Item -LiteralPath $log

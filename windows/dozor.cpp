@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
 #include <filesystem>
 #include "policy.hpp"
 
@@ -37,7 +38,7 @@ struct Engine {
 struct Transaction {
     HANDLE h;
     bool committed = false;
-    explicit Transaction(HANDLE handle) : h(handle) { check(FwpmTransactionBegin0(h, 0), "begin transaction"); }
+    explicit Transaction(HANDLE handle, UINT32 flags = 0) : h(handle) { check(FwpmTransactionBegin0(h, flags), "begin transaction"); }
     void commit() { check(FwpmTransactionCommit0(h), "commit transaction"); committed = true; }
     ~Transaction() { if (!committed) FwpmTransactionAbort0(h); }
 };
@@ -119,6 +120,85 @@ void changeApps(HANDLE engine, dozor::Action action, UINT64 vpn, bool remove, in
     }
     tx.commit();
 }
+struct PolicyStatus {
+    bool persistentLock = false;
+    std::vector<UINT64> permitInterfaces;
+    unsigned unexpected = 0;
+};
+void inspectRule(const FWPM_FILTER0& f, const App& app, const GUID& expectedLock, PolicyStatus& status) {
+    if (!IsEqualGUID(f.subLayerKey, sublayer)) return;
+    bool selected = false;
+    UINT64 local = 0, next = 0;
+    for (UINT32 i = 0; i < f.numFilterConditions; ++i) {
+        const auto& c = f.filterCondition[i];
+        if (c.matchType != FWP_MATCH_EQUAL) continue;
+        const auto& v = c.conditionValue;
+        if (IsEqualGUID(c.fieldKey, FWPM_CONDITION_ALE_APP_ID) && v.type == FWP_BYTE_BLOB_TYPE &&
+            v.byteBlob && v.byteBlob->size == app.id->size &&
+            !std::memcmp(v.byteBlob->data, app.id->data, app.id->size)) selected = true;
+        if (v.type != FWP_UINT64 || !v.uint64) continue;
+        if (IsEqualGUID(c.fieldKey, FWPM_CONDITION_IP_LOCAL_INTERFACE)) local = *v.uint64;
+        if (IsEqualGUID(c.fieldKey, FWPM_CONDITION_IP_NEXTHOP_INTERFACE)) next = *v.uint64;
+    }
+    if (!selected) return;
+    if (f.numFilterConditions == 1 && f.action.type == FWP_ACTION_BLOCK &&
+        (f.flags & FWPM_FILTER_FLAG_PERSISTENT) && IsEqualGUID(f.filterKey, expectedLock))
+        status.persistentLock = true;
+    else if (f.numFilterConditions == 3 && f.action.type == FWP_ACTION_PERMIT &&
+             !(f.flags & FWPM_FILTER_FLAG_PERSISTENT) && local && local == next)
+        status.permitInterfaces.push_back(local);
+    else
+        ++status.unexpected;
+}
+
+PolicyStatus readStatus(HANDLE engine, const App& app, dozor::Family family) {
+    FWPM_FILTER_ENUM_TEMPLATE0 query{};
+    query.layerKey = family == dozor::Family::ipv4 ? FWPM_LAYER_ALE_AUTH_CONNECT_V4 : FWPM_LAYER_ALE_AUTH_CONNECT_V6;
+    query.actionMask = 0xffffffff;
+    HANDLE cursor{};
+    check(FwpmFilterCreateEnumHandle0(engine, &query, &cursor), "query WFP filters");
+    struct CloseCursor {
+        HANDLE engine, cursor;
+        ~CloseCursor() { FwpmFilterDestroyEnumHandle0(engine, cursor); }
+    } close{engine, cursor};
+    PolicyStatus result;
+    const auto expectedLock = lockId(app, family);
+    UINT32 count;
+    do {
+        struct Page {
+            FWPM_FILTER0** filters{};
+            ~Page() { if (filters) FwpmFreeMemory0(reinterpret_cast<void**>(&filters)); }
+        } page;
+        check(FwpmFilterEnum0(engine, cursor, 64, &page.filters, &count), "read WFP filters");
+        for (UINT32 i = 0; i < count; ++i) inspectRule(*page.filters[i], app, expectedLock, result);
+    } while (count == 64);
+    return result;
+}
+
+void showStatus(HANDLE engine, int count, wchar_t** paths) {
+    Transaction snapshot(engine, FWPM_TXN_READ_ONLY);
+    for (int i = 0; i < count; ++i) {
+        App app(paths[i]);
+        std::printf("%s\n", std::filesystem::path(paths[i]).u8string().c_str());
+        for (auto family : {dozor::Family::ipv4, dozor::Family::ipv6}) {
+            auto status = readStatus(engine, app, family);
+            std::printf("IPv%d persistent-lock=%s", family == dozor::Family::ipv4 ? 4 : 6,
+                         status.persistentLock ? "yes" : "no");
+            if (status.permitInterfaces.empty()) std::printf(" permit=none");
+            for (UINT64 value : status.permitInterfaces) {
+                NET_LUID luid{};
+                luid.Value = value;
+                GUID guid{};
+                wchar_t name[40]{};
+                if (ConvertInterfaceLuidToGuid(&luid, &guid) == NO_ERROR)
+                    StringFromGUID2(guid, name, 40);
+                std::printf(" permit=luid:%llu adapter=%ls", value, name[0] ? name : L"unknown");
+            }
+            std::printf(" unexpected=%u\n", status.unexpected);
+        }
+    }
+    snapshot.commit();
+}
 UINT64 tunnel(const GUID& id) {
 #ifdef DOZOR_TEST_LOOPBACK
     // This executable is built only for the disposable CI client.
@@ -145,11 +225,16 @@ UINT64 tunnel(const GUID& id) {
 }
 int wmain(int argc, wchar_t** argv) {
     if (argc < 3) {
-        std::fputs("dozor-win lock APP.exe [...]\ndozor-win guard {VPN-GUID} APP.exe [...]\ndozor-win unlock APP.exe [...]\n", stderr);
+        std::fputs("dozor-win lock APP.exe [...]\ndozor-win guard {VPN-GUID} APP.exe [...]\ndozor-win unlock APP.exe [...]\ndozor-win status APP.exe [...]\n", stderr);
         return 2;
     }
     try {
         const std::wstring command(argv[1]);
+        if (command == L"status") {
+            Engine reader(false);
+            showStatus(reader.h, argc - 2, argv + 2);
+            return 0;
+        }
         bool guard = command == L"guard", remove = command == L"unlock";
         if ((!guard && !remove && command != L"lock") || (guard && argc < 4))
             throw Failure{"invalid arguments", ERROR_INVALID_PARAMETER};
