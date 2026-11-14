@@ -681,7 +681,14 @@ final class Monitor: ObservableObject {
             return
         }
         let up = transportAvailable() && (cfg.guard.vpn_service_id.isEmpty || mayThaw)
-        if !up && lastProxyUp != false {
+        // A failed round already revoked its proof and recorded the specific
+        // reason. The fallback HTTP port is unrelated to an incy TUN failure.
+        let hasSpecificFailure: Bool
+        switch state {
+        case .error, .offline, .mismatch: hasSpecificFailure = true
+        default: hasSpecificFailure = false
+        }
+        if !up && lastProxyUp != false && !hasSpecificFailure {
             let lostTunnel = (verifiedTunnel ?? roundTunnel) != nil
             let reason = lostTunnel ? "Туннель incy отключён или изменился" :
                 (cfg.guard.vpn_service_id.isEmpty ? "Локальный прокси VPN недоступен" : "Системная служба VPN или её прокси недоступны")

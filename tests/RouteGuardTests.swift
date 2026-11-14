@@ -68,6 +68,7 @@ func testRouteGuard() {
     restarted.runningApplications = { [] }; restarted.applicationURL = { _ in nil }
     restarted.processGuard.snapshotProcesses = { [:] }
     restarted.readIncyTunnel = { tunnel }; restarted.readIPv6Route = { .absent }
+    restarted.proxyAcceptsConnections = { _ in false }
     restarted.handleAnswers([ip, ip], additionalRoutes: [ip], generation: restarted.beginRouteRound(),
                             traceRoutes: Dictionary(uniqueKeysWithValues: Monitor.claudeHosts.map { ($0, ip) }), systemSeen: true)
     expect(restarted.guardDecision?.allowed == false && restarted.routeSummary.contains("2001:db8::42"),
