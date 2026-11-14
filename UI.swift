@@ -240,12 +240,17 @@ struct OverviewView: View {
         HStack(spacing: 20) {
             Text(m.state.country.map(flag) ?? (m.online ? "🌐" : "⚠️")).font(.system(size: 64))
             VStack(alignment: .leading, spacing: 6) {
-                Text(m.state.ip ?? m.state.title)
-                    .font(.system(size: 30, weight: .semibold, design: .monospaced))
-                    .textSelection(.enabled)
+                if case .error(let reason) = m.state {
+                    Text("Маршрут не подтверждён").font(.title2.bold())
+                    Text(reason).font(.callout).textSelection(.enabled)
+                } else {
+                    Text(m.state.ip ?? m.state.title)
+                        .font(.system(size: 30, weight: .semibold, design: .monospaced))
+                        .textSelection(.enabled)
+                }
                 if let cc = m.state.country { Text(countryName(cc)).font(.title3).foregroundStyle(.secondary) }
                 HStack {
-                    Pill(text: m.state.title, color: statusColor(m))
+                    if m.state.ip != nil { Pill(text: m.state.title, color: statusColor(m)) }
                     if !m.frozen.isEmpty { Pill(text: "❄︎ " + Set(m.frozen.values).sorted().joined(separator: ", "), color: .blue) }
                 }
             }

@@ -25,6 +25,17 @@ func testRouteGuard() {
     expect(parse(route(79) + route(80)) == .unknown && parse(route(79) + [0]) == .unknown &&
            parse(Array(route(79).dropLast())) == .unknown, "ambiguous or truncated tables yield unknown")
 
+    let header = MemoryLayout<rt_msghdr2>.size
+    var host = route(80, RTF_UP | RTF_HOST)
+    host[header + 8] = 0x20
+    expect(parse(host) == .unknown && parse(route(79) + host) == .unknown,
+           "external IPv6 host route without a default or outside the tunnel prevents proof")
+    var half = route(80)
+    half += [0,0,0,0,0x80,0,0,0]
+    half[header + MemoryLayout<sockaddr_in6>.size] = 9
+    withUnsafeBytes(of: UInt16(half.count)) { half.replaceSubrange(0..<2, with: $0) }
+    expect(parse(half) == .unknown, "split ::/1 route cannot be classified as IPv4 only")
+
     let ip = "192.0.2.19"
     let tunnel = IncyTunnel(pid: 901, started: 33, microseconds: 15, index: 79, name: "utun79", address: "198.18.0.2")
     let m = Monitor()
@@ -59,20 +70,29 @@ func testRouteGuard() {
     defaultRoute = .absent
     reply(m.beginRouteRound(), v6: true)
     expect(m.guardDecision?.allowed == false, "reachable IPv6 without a tunnel default is not silently ignored")
+    // 0.4.1 stored an address without provenance. A new full route check must
+    // be able to supersede that record on the same tunnel after an update.
+    let legacy = """
+    {"address":"2001:db8::42","tunnel":{"pid":901,"started":33,"microseconds":15,"index":79,"name":"utun79","address":"198.18.0.2"}}
+    """
+    try! legacy.write(to: supportDir.appendingPathComponent("ipv6-observation.json"), atomically: true, encoding: .utf8)
     reply(m.beginRouteRound())
-    reply(m.beginRouteRound())
-    expect(m.guardDecision?.allowed == false && m.routeSummary.contains("2001:db8::42"),
-           "silent IPv6 probes cannot undo a previously observed egress on the same tunnel")
-    let restarted = Monitor()
-    restarted.cfg = m.cfg
-    restarted.runningApplications = { [] }; restarted.applicationURL = { _ in nil }
-    restarted.processGuard.snapshotProcesses = { [:] }
-    restarted.readIncyTunnel = { tunnel }; restarted.readIPv6Route = { .absent }
-    restarted.proxyAcceptsConnections = { _ in false }
-    restarted.handleAnswers([ip, ip], additionalRoutes: [ip], generation: restarted.beginRouteRound(),
-                            traceRoutes: Dictionary(uniqueKeysWithValues: Monitor.claudeHosts.map { ($0, ip) }), systemSeen: true)
-    expect(restarted.guardDecision?.allowed == false && restarted.routeSummary.contains("2001:db8::42"),
-           "monitor restart cannot forget the intermittent IPv6 on the same tunnel")
+    expect(m.guardDecision?.allowed == true && m.mayThaw && m.routeSummary.contains("IPv4"),
+           "complete fresh IPv4-only proof recovers despite legacy observation")
+    let remoteExits = Dictionary(uniqueKeysWithValues: Monitor.claudeHosts.map { ($0, "2001:db8::42") })
+    func boundIPv4Reply() {
+        m.handleAnswers([ip,ip], additionalRoutes: [ip], generation: m.beginRouteRound(),
+                        traceRoutes: remoteExits, systemSeen: true)
+    }
+    boundIPv4Reply()
+    expect(m.guardDecision?.allowed == true, "allowlisted remote IPv6 from IPv4-bound tunnel trace accepted")
+    m.cfg.guard.allow.ips = [ip]
+    boundIPv4Reply()
+    expect(m.guardDecision?.allowed == false, "remote IPv6 outside allowlist still blocks")
+    m.cfg.guard.allow.ips.append("2001:db8::42")
+    defaultRoute = .unknown
+    expect(!m.mayThaw, "a newly usable or unknown IPv6 path revokes a cached IPv4 proof")
+    defaultRoute = .absent
     let generation = m.beginRouteRound()
     defaultRoute = .interface(79)
     reply(generation, v6: true)

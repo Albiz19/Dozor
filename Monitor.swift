@@ -70,28 +70,6 @@ final class Monitor: ObservableObject {
     var readIncyTunnel: () -> IncyTunnel? = IncyTunnel.current
     var readIPv6Route: () -> IncyTunnel.DefaultRoute = { IncyTunnel.defaultRoute(AF_INET6) }
     private var roundVPNConnected = false
-    private struct IPv6Observation: Codable, Equatable {
-        let tunnel: IncyTunnel
-        let address: String
-    }
-    private var observationFile: URL {
-        processGuard.stateURL.deletingLastPathComponent().appendingPathComponent("ipv6-observation.json")
-    }
-    private lazy var previousIPv6: IPv6Observation? = {
-        guard let data = try? Data(contentsOf: observationFile) else { return nil }
-        return try? JSONDecoder().decode(IPv6Observation.self, from: data)
-    }()
-
-    // A disappearing HTTP answer does not show that the previous egress closed.
-    // Scope the observation to the Xray process birth and the concrete TUN identity.
-    private func observeIPv6(_ address: String, on tunnel: IncyTunnel) {
-        let next = IPv6Observation(tunnel: tunnel, address: address)
-        guard previousIPv6 != next else { return }
-        previousIPv6 = next
-        do { try JSONEncoder().encode(next).write(to: observationFile, options: .atomic) }
-        catch { log("Не удалось сохранить наблюдение IPv6 для следующего запуска") }
-    }
-
     private var roundV6Route: IncyTunnel.DefaultRoute = .unknown
     private var verifiedV6Route: IncyTunnel.DefaultRoute = .unknown
     private(set) var roundTunnel: IncyTunnel?
@@ -512,22 +490,20 @@ final class Monitor: ObservableObject {
             if let tunnel = roundTunnel {
                 guard readIncyTunnel() == tunnel else { failRound("Туннель incy изменился во время проверки"); return }
                 guard roundV6Route == readIPv6Route() else { failRound("Маршрут IPv6 изменился во время проверки"); return }
-                let ipv6Exits = (answers + additionalRoutes + Array(traceRoutes.values))
-                    .filter { $0.contains(":") && isValidIP($0) }.sorted()
-                if let address = ipv6Exits.first(where: { !permittedIP($0) }) ?? ipv6Exits.first {
-                    observeIPv6(address, on: tunnel)
-                }
                 switch roundV6Route {
                 case .absent:
-                    if let seen = previousIPv6, seen.tunnel == tunnel {
-                        failRound("На этом туннеле обнаружен выход IPv6 \(seen.address). Маршрут IPv6 через VPN не подтверждён.")
+                    // Bound Claude traces use IPv4 on the TUN. Their reported exit
+                    // can be IPv6 on the far side and is still checked by routeIssue.
+                    let unboundExits = (answers + additionalRoutes).filter { $0.contains(":") }.sorted()
+                    if ipv6Confirmed || !unboundExits.isEmpty {
+                        failRound("Сервис проверки сообщил IPv6 " + (unboundExits.first ?? "") +
+                                  ". На Mac маршрут для этого соединения не подтверждён.")
                         return
                     }
-                    guard !ipv6Confirmed else { failRound("Не подтверждён маршрут обнаруженного IPv6"); return }
                 case .interface(let index) where index == tunnel.index:
                     guard ipv6Confirmed else { failRound("Выход IPv6 через туннель не подтверждён"); return }
                 case .interface: failRound("Основной маршрут IPv6 проходит вне туннеля incy"); return
-                case .unknown: failRound("Не удалось проверить таблицу маршрутов IPv6"); return
+                case .unknown: failRound("Не удалось исключить выход по IPv6 вне туннеля"); return
                 }
             } else if !proxyAcceptsConnections(cfg.guard.proxy_port) {
                 failRound("Локальный прокси VPN недоступен"); return
@@ -554,6 +530,9 @@ final class Monitor: ObservableObject {
             checking = false
             verifiedAt = ProcessInfo.processInfo.systemUptime
             routeSummary = (verifiedTunnel.map { "incy TUN (\($0.name)) · " } ?? "") + "Проверенные выходы: " + routes.joined(separator: ", ") + (guardActive || !processGuard.records.isEmpty ? " · маршруты Claude проверены" : "")
+            if verifiedTunnel != nil && verifiedV6Route == .absent {
+                routeSummary += " · на Mac проверен режим IPv4"
+            }
             state = .ok(ip: ip, country: countryCache[ip])
             if lastIP != ip { lastIP = ip; log("IP: \(ip)") }
             enforce(freshGeneration: token)

@@ -9,7 +9,7 @@ if [[ -n "${DOZOR_BUILD_DIR:-}" && ( -e "$APP" || -L "$APP" ) ]]; then
 fi
 mkdir -p "${APP:h}"
 RELEASE_VERSION=$(cat VERSION)
-BUILD_NUMBER=6
+BUILD_NUMBER=7
 BUILD_TMP=$(mktemp -d)
 trap 'rm -rf "$BUILD_TMP"' EXIT
 rm -rf -- "$APP"

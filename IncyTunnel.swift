@@ -54,16 +54,43 @@ struct IncyTunnel: Equatable, Codable {
         case unknown
     }
 
+    // With only link-local addresses macOS can still have scoped utun defaults.
+    // A usable unicast source (including ULA) makes their absence as an
+    // unscoped default insufficient evidence for IPv4-only operation.
+    static func hasRoutableIPv6Address() -> Bool? {
+        var head: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&head) == 0, let first = head else { return nil }
+        defer { freeifaddrs(head) }
+        var node: UnsafeMutablePointer<ifaddrs>? = first
+        while let entry = node {
+            let item = entry.pointee
+            node = item.ifa_next
+            guard Int32(item.ifa_flags) & IFF_UP != 0, let sa = item.ifa_addr,
+                  Int32(sa.pointee.sa_family) == AF_INET6 else { continue }
+            guard sa.pointee.sa_len >= MemoryLayout<sockaddr_in6>.size else { return nil }
+            var address = UnsafeRawPointer(sa).load(as: sockaddr_in6.self).sin6_addr
+            if withUnsafeBytes(of: &address, { !isLocalIPv6($0) }) { return true }
+        }
+        return false
+    }
+
+    private static func isLocalIPv6(_ bytes: UnsafeRawBufferPointer) -> Bool {
+        let loopback = bytes.prefix(15).allSatisfy { $0 == 0 } && bytes[15] == 1
+        return loopback || bytes[0] == 0xff || (bytes[0] == 0xfe && bytes[1] & 0xc0 == 0x80)
+    }
+
     static func defaultRoute(_ family: Int32) -> DefaultRoute {
         var mib = [CTL_NET, PF_ROUTE, 0, family, NET_RT_DUMP2, 0]
         var size = 0
         guard family == AF_INET || family == AF_INET6,
               sysctl(&mib, 6, nil, &size, nil, 0) == 0 else { return .unknown }
-        guard size > 0 else { return .absent }
+        guard size > 0 else { return .unknown }
         var data = [UInt8](repeating: 0, count: size)
         guard sysctl(&mib, 6, &data, &size, nil, 0) == 0 else { return .unknown }
         guard size <= data.count else { return .unknown }
-        return parseDefaultRoute(data.prefix(size), family: family)
+        let route = parseDefaultRoute(data.prefix(size), family: family)
+        if family == AF_INET6 && route == .absent && hasRoutableIPv6Address() != false { return .unknown }
+        return route
     }
 
     static func parseDefaultRoute(_ data: ArraySlice<UInt8>, family: Int32) -> DefaultRoute {
@@ -72,34 +99,45 @@ struct IncyTunnel: Equatable, Codable {
             var offset = 0
             let headerSize = MemoryLayout<rt_msghdr2>.size
             var candidates = Set<UInt32>()
+            var specificInterfaces = Set<UInt32>()
             while offset + headerSize <= size {
                 let h = buf.loadUnaligned(fromByteOffset: offset, as: rt_msghdr2.self)
                 let end = offset + Int(h.rtm_msglen)
                 guard end >= offset + headerSize, end <= size else { return .unknown }
                 defer { offset = end }
-                let skip = RTF_IFSCOPE | RTF_HOST | RTF_REJECT | RTF_BLACKHOLE
-                guard h.rtm_flags & RTF_UP != 0, h.rtm_flags & skip == 0, h.rtm_addrs & RTA_DST != 0,
-                      h.rtm_addrs & RTA_NETMASK != 0 else { continue }
+                guard h.rtm_flags & RTF_UP != 0,
+                      h.rtm_flags & (RTF_REJECT | RTF_BLACKHOLE) == 0 else { continue }
                 var cursor = offset + headerSize
-                var isDefault = true
+                var zeroDestination = false
+                var localDestination = false
+                var zeroMask = false
+                guard h.rtm_addrs & RTA_DST != 0 else { return .unknown }
                 for i in 0...Int(RTAX_NETMASK) where h.rtm_addrs & (1 << i) != 0 {
                     guard cursor + 2 <= end else { return .unknown }
                     let length = Int(buf[cursor])
                     guard cursor + length <= end else { return .unknown }
                     if i == Int(RTAX_DST) {
-                        let addrOffset = family == AF_INET ? 4 : 8
-                        let bytes = family == AF_INET ? 4 : 16
-                        guard buf[cursor+1] == UInt8(family), length >= addrOffset + bytes else { isDefault = false; break }
-                        isDefault = buf[(cursor+addrOffset)..<(cursor+addrOffset+bytes)].allSatisfy { $0 == 0 }
-                    } else if i == Int(RTAX_NETMASK), length > 2 {
-                        isDefault = isDefault && buf[(cursor+2)..<(cursor+length)].allSatisfy { $0 == 0 }
+                        let start = family == AF_INET ? 4 : 8
+                        let count = family == AF_INET ? 4 : 16
+                        guard buf[cursor+1] == UInt8(family), length >= start + count else { return .unknown }
+                        let address = UnsafeRawBufferPointer(rebasing: buf[(cursor+start)..<(cursor+start+count)])
+                        zeroDestination = address.allSatisfy { $0 == 0 }
+                        localDestination = family == AF_INET6 && isLocalIPv6(address)
+                    } else if i == Int(RTAX_NETMASK) {
+                        zeroMask = length <= 2 || buf[(cursor+2)..<(cursor+length)].allSatisfy { $0 == 0 }
                     }
                     cursor += max(4, (length + 3) & ~3)
                 }
-                if isDefault { candidates.insert(UInt32(h.rtm_index)) }
+                if zeroDestination && zeroMask && h.rtm_flags & RTF_HOST == 0 {
+                    if h.rtm_flags & RTF_IFSCOPE == 0 { candidates.insert(UInt32(h.rtm_index)) }
+                } else if family == AF_INET6 && !localDestination && h.rtm_flags & RTF_LOCAL == 0 {
+                    // A host or split route (including ::/1) may exist without ::/0.
+                    specificInterfaces.insert(UInt32(h.rtm_index))
+                }
             }
             guard offset == size, candidates.count <= 1 else { return .unknown }
-            guard let index = candidates.first else { return .absent }
+            guard let index = candidates.first else { return specificInterfaces.isEmpty ? .absent : .unknown }
+            guard specificInterfaces.subtracting([index]).isEmpty else { return .unknown }
             return index == 0 ? .unknown : .interface(index)
         }
     }
