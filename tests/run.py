@@ -29,7 +29,7 @@ with tempfile.TemporaryDirectory(prefix='dozor-checks-') as temporary:
     verifier = subprocess.Popen([str(root / 'verify')], env=env, start_new_session=True)
     try:
         if verifier.wait(timeout=60) != 0:
-            raise RuntimeError("fixture verifier failed")
+            raise RuntimeError(f"fixture verifier exited with {verifier.returncode}")
     finally:
         # Foundation may give fixture children their own process group. Never
         # walk the host table: validate only PIDs reported in this test directory.

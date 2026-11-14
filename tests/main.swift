@@ -26,8 +26,8 @@ if CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "local-redire
 }
 
 func expect(_ condition: @autoclosure () -> Bool, _ label: String) {
-    precondition(condition(), label)
-    print("PASS: \(label)")
+    guard condition() else { fputs("FAIL: \(label)\n", stderr); exit(1) }
+    print("PASS: \(label)"); fflush(stdout)
 }
 let fm = FileManager.default
 try fm.createDirectory(at: supportDir, withIntermediateDirectories: true)
