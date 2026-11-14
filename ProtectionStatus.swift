@@ -2,7 +2,7 @@
 import SwiftUI
 
 enum ProtectionStatus: Equatable {
-    case off, noTargets, watching, checking, paused, holding, blocked
+    case off, noTargets, watching, checking, paused, holding, blocked, manual
 
     var title: String {
         switch self {
@@ -12,6 +12,7 @@ enum ProtectionStatus: Equatable {
         case .checking: return "Проверяем сеть"
         case .paused: return "Блокировка на паузе"
         case .holding: return "Процессы заморожены"
+        case .manual: return "Ручная блокировка"
         case .blocked: return "Выход не разрешён"
         }
     }
@@ -23,6 +24,7 @@ enum ProtectionStatus: Equatable {
         case .checking: return "clock"
         case .paused: return "pause.circle.fill"
         case .holding: return "snowflake"
+        case .manual: return "lock.fill"
         case .blocked: return "exclamationmark.shield.fill"
         }
     }
@@ -34,6 +36,7 @@ enum ProtectionStatus: Equatable {
         case .checking: return .secondary
         case .paused: return .orange
         case .holding: return .blue
+        case .manual: return .orange
         case .blocked: return .red
         }
     }
@@ -41,6 +44,7 @@ enum ProtectionStatus: Equatable {
 
 extension Monitor {
     var protectionStatus: ProtectionStatus {
+        if cfg.guard.manual_hold && (guardActive || !frozen.isEmpty) { return .manual }
         if !frozen.isEmpty { return .holding }
         if !cfg.guard.enabled { return .off }
         if cfg.guard.apps.isEmpty { return .noTargets }
@@ -62,6 +66,8 @@ extension Monitor {
         case .watching: return "Дозор приостановит выбранные процессы, когда обнаружит смену выхода. До обнаружения возможен сетевой трафик."
         case .checking: return "Дозор проверяет, совпадает ли маршрут с разрешённым."
         case .paused: return "Новые процессы могут работать при смене IP."
+        case .manual:
+            return "Заморожено процессов: \(frozen.count). Возобновление возможно после снятия ручной блокировки и новой проверки VPN."
         case .holding:
             var parts = ["Заморожено процессов: \(frozen.count)."]
             if paused && guardActive { parts.append("Новые процессы могут работать.") }
@@ -112,8 +118,14 @@ struct ProtectionControls: View {
                     set: { enabled in m.updateConfig { $0.guard.enabled = enabled } }))
                     .toggleStyle(.switch).labelsHidden()
                     .help("Включить автоматическую блокировку выбранных приложений")
+                    .disabled(m.cfg.guard.manual_hold)
             }
-            if m.guardActive {
+            if m.guardActive || m.cfg.guard.manual_hold {
+                Toggle("Удерживать до ручного снятия", isOn: Binding(
+                    get: { m.cfg.guard.manual_hold }, set: m.setManualHold))
+                    .help("Выбранные процессы остаются замороженными даже при работающем VPN.")
+            }
+            if m.guardActive && !m.cfg.guard.manual_hold {
                 Button(action: m.togglePause) {
                     HStack(spacing: 12) {
                         Image(systemName: m.paused ? "play.fill" : "pause.fill")
@@ -176,7 +188,7 @@ struct StatusMenuHeader: View {
                         .help("Последняя проверка сети")
                 }
             }.font(.caption).foregroundStyle(.secondary)
-            if [.holding, .blocked, .paused].contains(state) {
+            if [.holding, .blocked, .paused, .manual].contains(state) {
                 Text(m.protectionDetail).font(.callout).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }

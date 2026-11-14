@@ -317,6 +317,8 @@ struct ProtectionView: View {
                 Button { showPicker = true } label: { Label("Выбрать приложения…", systemImage: "plus.circle") }
             }
 
+            VPNProfilesSection(m: m)
+
             Section {
                 DisclosureGroup("Последняя проверка маршрутов", isExpanded: $showRoutes) {
                     VStack(alignment: .leading, spacing: 5) {
@@ -364,6 +366,7 @@ struct ProtectionView: View {
                 Text("Для выбранных приложений разрешает только TCP к локальному порту VPN. Изменив список или порт, примените правила заново. Для ранее открытых соединений перезапустите защищаемые приложения.")
                 if systemFilter.canInstall {
                     Button("Применить правила в macOS") { systemFilter.apply(m.cfg.guard) }.disabled(systemFilter.busy || m.cfg.guard.apps.isEmpty)
+                    Button("Проверить конфигурацию фильтра") { systemFilter.refreshStatus() }.disabled(systemFilter.busy)
                     Text(systemFilter.status)
                 } else { Text("Эта сборка не подписана для активации системного фильтра.").foregroundStyle(.secondary) }
             }
@@ -373,7 +376,7 @@ struct ProtectionView: View {
             }
         }
         .formStyle(.grouped)
-        .onAppear { catalog.load() }
+        .onAppear { catalog.load(); systemFilter.refreshStatus() }
         .sheet(isPresented: $showPicker) { AppPicker(m: m, catalog: catalog, isPresented: $showPicker) }
     }
 
@@ -400,6 +403,84 @@ struct ProtectionView: View {
         guard !ip.isEmpty, !m.cfg.guard.allow.ips.contains(ip) else { return }
         m.updateConfig { $0.guard.allow.ips.append(ip) }
         newIP = ""
+    }
+}
+
+extension Monitor {
+    func applyProfile(_ id: UUID) -> Bool {
+        guard cfgError == nil, cfgMTime == configMTime() else { return false }
+        var next = cfg
+        guard next.guard.activateProfile(id), saveConfig(next) else { return false }
+        reloadConfig(force: true)
+        enforce()
+        checkNow()
+        return cfgError == nil
+    }
+
+    // Editing the profile library does not change the live network rules.
+    func storeProfiles(_ profiles: [VPNProfile]) -> Bool {
+        guard cfgError == nil, configMTime() == cfgMTime else { return false }
+        var next = cfg
+        next.guard.profiles = profiles
+        guard saveConfig(next) else { return false }
+        cfg = next
+        cfgMTime = configMTime()
+        return true
+    }
+}
+
+private struct VPNProfilesSection: View {
+    @ObservedObject var m: Monitor
+    @State private var name = ""
+    @State private var error: String?
+
+    var body: some View {
+        Section {
+            ForEach(m.cfg.guard.profiles) { profile in
+                HStack {
+                    VStack(alignment: .leading) {
+                        Text(profile.name)
+                        Text((profile.vpnServiceID.isEmpty ? "incy TUN" : profile.vpnServiceID)
+                             + " · порт \(profile.proxyPort) · "
+                             + (profile.ips.isEmpty ? "выход запрещён" : profile.ips.joined(separator: ", ")))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if profile.matches(m.cfg.guard) {
+                        Image(systemName: "checkmark").accessibilityLabel("Соответствует текущим настройкам")
+                    } else {
+                        Button("Применить") {
+                            guard profile.validSettings else { error = "Проверьте IP и порт в сохранённом профиле."; return }
+                            error = m.applyProfile(profile.id) ? nil : "Не удалось применить профиль к файлу настроек."
+                        }
+                    }
+                    Button(role: .destructive) {
+                        if m.storeProfiles(m.cfg.guard.profiles.filter { $0.id != profile.id }) {
+                            error = nil
+                        } else { error = "Не удалось обновить файл настроек." }
+                    } label: { Image(systemName: "trash") }
+                        .accessibilityLabel("Удалить профиль " + profile.name)
+                }
+            }
+            HStack {
+                TextField("Название, например «Рабочий VPN»", text: $name).onSubmit(save)
+                Button("Сохранить текущие настройки", action: save)
+                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            if let error { Text(error).font(.caption).foregroundStyle(.red) }
+        } header: { Text("Профили VPN") } footer: {
+            Text("Профиль запоминает разрешённые IP, порт прокси и службу VPN. После переключения Дозор заново проверит сеть.")
+        }
+    }
+
+    private func save() {
+        var rules = m.cfg.guard
+        guard rules.saveProfile(named: name) else {
+            error = "Укажите уникальное название до 80 символов, корректные IP и порт от 1 до 65535."
+            return
+        }
+        guard m.storeProfiles(rules.profiles) else { error = "Не удалось сохранить профиль в файл настроек."; return }
+        name = ""; error = nil
     }
 }
 
@@ -553,23 +634,66 @@ struct LatencyView: View {
 
 struct LogView: View {
     @ObservedObject var m: Monitor
-    @State var query = ""
+    @State private var query = ""
+    @State private var showDecisions = true
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
+                Picker("Журнал", selection: $showDecisions) {
+                    Text("Решения").tag(true)
+                    Text("События").tag(false)
+                }.pickerStyle(.segmented).labelsHidden().frame(width: 190)
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                 TextField("Поиск", text: $query).textFieldStyle(.plain)
-                Button("Открыть файл") { NSWorkspace.shared.open(logURL) }
+                if !showDecisions { Button("Открыть файл") { NSWorkspace.shared.open(logURL) } }
             }
             .padding(10)
             Divider()
-            let items = Array(m.events.reversed().filter { query.isEmpty || $0.localizedCaseInsensitiveContains(query) }.enumerated())
-            List(items, id: \.offset) { _, e in
-                HStack(alignment: .top, spacing: 10) {
-                    Image(systemName: icon(for: e)).foregroundStyle(color(for: e)).frame(width: 18)
-                    Text(String(e.prefix(19))).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)
-                    Text(String(e.dropFirst(20))).textSelection(.enabled)
+            if showDecisions {
+                Decisions(history: m.decisionHistory, query: query)
+            } else {
+                let items = Array(m.events.reversed().filter { query.isEmpty || $0.localizedCaseInsensitiveContains(query) }.enumerated())
+                List(items, id: \.offset) { _, e in
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: icon(for: e)).foregroundStyle(color(for: e)).frame(width: 18)
+                        Text(String(e.prefix(19))).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)
+                        Text(String(e.dropFirst(20))).textSelection(.enabled)
+                    }
+                }
+            }
+        }
+    }
+
+    private struct Decisions: View {
+        @ObservedObject var history: DecisionHistory
+        let query: String
+
+        var body: some View {
+            let visible = history.entries.reversed().filter { entry in
+                let fields = [entry.decision.verdict.title, entry.decision.reason, timeFmt.string(from: entry.date)] + entry.decision.matches
+                return query.isEmpty || fields.contains { $0.localizedCaseInsensitiveContains(query) }
+            }
+            if history.saveFailed {
+                Text("Не удалось сохранить историю решений на диске.").foregroundStyle(.secondary)
+            }
+            if visible.isEmpty {
+                Text(query.isEmpty ? "Решений пока нет" : "Совпадений нет")
+                    .foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(visible) { entry in
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text(entry.decision.verdict.title).font(.headline)
+                            Spacer()
+                            Text(timeFmt.string(from: entry.date)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                        }
+                        Text(entry.decision.reason)
+                        if !entry.decision.matches.isEmpty {
+                            Text("Выход и правило: " + entry.decision.matches.joined(separator: ", "))
+                                .font(.caption.monospaced()).foregroundStyle(.secondary)
+                        }
+                    }.textSelection(.enabled).padding(.vertical, 2)
                 }
             }
         }
@@ -607,6 +731,9 @@ struct SettingsView: View {
         Form {
             Section("Общее") {
                 Toggle("Запускать при входе в систему", isOn: Binding(get: { m.launchAtLogin }, set: { m.setLaunchAtLogin($0) }))
+                Toggle("Перезапускать Дозор после сбоя", isOn: bind(\.crash_recovery))
+                Text("После сбоя наблюдатель перезапустит эту копию Дозора. Пока Дозор закрыт, новые процессы не замораживаются. После трёх быстрых сбоев откройте его вручную.").font(.caption)
+                if let error = m.recoveryError { Text(error).foregroundStyle(.red) }
                 Toggle("Показывать уведомления", isOn: bind(\.notifications))
                 Picker("В строке меню", selection: bind(\.menubar)) {
                     Text("Флаг и IP").tag("ip")

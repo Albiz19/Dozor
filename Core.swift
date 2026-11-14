@@ -42,7 +42,47 @@ struct AllowRules: Codable {
     }
 }
 
+struct VPNProfile: Identifiable, Codable, Equatable {
+    let id: UUID
+    let name: String
+    let ips: [String]
+    let proxyPort: Int
+    let vpnServiceID: String
+
+    func matches(_ rules: GuardConfig) -> Bool {
+        Set(ips) == Set(rules.allow.ips) && proxyPort == rules.proxy_port && vpnServiceID == rules.vpn_service_id
+    }
+
+    var validSettings: Bool {
+        (1...65535).contains(proxyPort) && ips.allSatisfy { rule in
+            let address = String(rule.prefix { $0 != "/" })
+            return ipMatches(address, rule: rule)
+        }
+    }
+}
+
 struct GuardConfig: Codable {
+    var manual_hold = false
+    var profiles: [VPNProfile] = []
+    mutating func saveProfile(named input: String) -> Bool {
+        let name = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name.count <= 80,
+              !name.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
+              !profiles.contains(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) else { return false }
+        let p = VPNProfile(id: UUID(), name: name, ips: allow.ips, proxyPort: proxy_port, vpnServiceID: vpn_service_id)
+        guard p.validSettings else { return false }
+        profiles.append(p)
+        return true
+    }
+
+    mutating func activateProfile(_ id: UUID) -> Bool {
+        guard let p = profiles.first(where: { $0.id == id }), p.validSettings else { return false }
+        allow.ips = p.ips
+        proxy_port = p.proxyPort
+        vpn_service_id = p.vpnServiceID
+        return true
+    }
+
     var enabled = false
     var vpn_service_id = ""
     var proxy_port = 10808
@@ -56,6 +96,11 @@ struct GuardConfig: Codable {
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
         let def = GuardConfig()
+        manual_hold = try c.decodeIfPresent(Bool.self, forKey: .manual_hold) ?? false
+        profiles = try c.decodeIfPresent([VPNProfile].self, forKey: .profiles) ?? []
+        guard Set(profiles.map(\.id)).count == profiles.count else {
+            throw DecodingError.dataCorruptedError(forKey: .profiles, in: c, debugDescription: "Повторяется ID профиля VPN")
+        }
         enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? def.enabled
         vpn_service_id = try c.decodeIfPresent(String.self, forKey: .vpn_service_id) ?? def.vpn_service_id
         proxy_port = try c.decodeIfPresent(Int.self, forKey: .proxy_port) ?? def.proxy_port
@@ -94,6 +139,7 @@ struct Config: Codable {
     ]
     var min_agree = 2
     var menubar = "ip"                 // ip | country | icon
+    var crash_recovery = false
     var notifications = true
     var latency_interval: Double = 300
     var latency_targets: [Target] = [
@@ -112,6 +158,7 @@ struct Config: Codable {
         ip_services = try c.decodeIfPresent([String].self, forKey: .ip_services) ?? def.ip_services
         min_agree = max(1, try c.decodeIfPresent(Int.self, forKey: .min_agree) ?? def.min_agree)
         menubar = try c.decodeIfPresent(String.self, forKey: .menubar) ?? def.menubar
+        crash_recovery = try c.decodeIfPresent(Bool.self, forKey: .crash_recovery) ?? false
         notifications = try c.decodeIfPresent(Bool.self, forKey: .notifications) ?? def.notifications
         latency_interval = max(30, try c.decodeIfPresent(Double.self, forKey: .latency_interval) ?? def.latency_interval)
         latency_targets = try c.decodeIfPresent([Target].self, forKey: .latency_targets) ?? def.latency_targets
@@ -131,21 +178,22 @@ func loadConfig() -> (Config, String?) {
     catch { return (Config(), "ошибка в config.json: \(error.localizedDescription)") }
 }
 
-func saveConfig(_ cfg: Config) {
+@discardableResult func saveConfig(_ cfg: Config) -> Bool {
     let enc = JSONEncoder()
     enc.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-    guard let data = try? enc.encode(cfg) else { return }
+    guard let data = try? enc.encode(cfg) else { return false }
     // The JSON may include a bot token. Preserve owner-only access across atomic replacements.
     let temp = supportDir.appendingPathComponent(".config-" + UUID().uuidString)
-    guard FileManager.default.createFile(atPath: temp.path, contents: nil, attributes: [.posixPermissions: 0o600]) else { return }
+    guard FileManager.default.createFile(atPath: temp.path, contents: nil, attributes: [.posixPermissions: 0o600]) else { return false }
     defer { try? FileManager.default.removeItem(at: temp) }
     do {
         let handle = try FileHandle(forWritingTo: temp)
         defer { try? handle.close() }
         try handle.write(contentsOf: data)
         try handle.synchronize()
-        guard rename(temp.path, configURL.path) == 0 else { return }
-    } catch { return }
+        guard rename(temp.path, configURL.path) == 0 else { return false }
+        return true
+    } catch { return false }
 }
 
 func configMTime() -> Date? {

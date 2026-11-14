@@ -59,6 +59,19 @@ func testRouteGuard() {
     defaultRoute = .absent
     reply(m.beginRouteRound(), v6: true)
     expect(m.guardDecision?.allowed == false, "reachable IPv6 without a tunnel default is not silently ignored")
+    reply(m.beginRouteRound())
+    reply(m.beginRouteRound())
+    expect(m.guardDecision?.allowed == false && m.routeSummary.contains("2001:db8::42"),
+           "silent IPv6 probes cannot undo a previously observed egress on the same tunnel")
+    let restarted = Monitor()
+    restarted.cfg = m.cfg
+    restarted.runningApplications = { [] }; restarted.applicationURL = { _ in nil }
+    restarted.processGuard.snapshotProcesses = { [:] }
+    restarted.readIncyTunnel = { tunnel }; restarted.readIPv6Route = { .absent }
+    restarted.handleAnswers([ip, ip], additionalRoutes: [ip], generation: restarted.beginRouteRound(),
+                            traceRoutes: Dictionary(uniqueKeysWithValues: Monitor.claudeHosts.map { ($0, ip) }), systemSeen: true)
+    expect(restarted.guardDecision?.allowed == false && restarted.routeSummary.contains("2001:db8::42"),
+           "monitor restart cannot forget the intermittent IPv6 on the same tunnel")
     let generation = m.beginRouteRound()
     defaultRoute = .interface(79)
     reply(generation, v6: true)

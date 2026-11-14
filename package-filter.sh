@@ -24,10 +24,12 @@ if [[ -n "$ID" ]]; then
         sed "s/TEAMID/$TEAM/g" "Filter/$role.entitlements" > "$BUILD_TMP/$role.entitlements"
     done
     codesign --force --timestamp --options runtime -s "$ID" --entitlements "$BUILD_TMP/filter.entitlements" "$EXT"
+    codesign --force --timestamp --options runtime -s "$ID" "$APP/Contents/MacOS/dozor-watchdog"
     codesign --force --timestamp --options runtime -s "$ID" "$APP/Contents/MacOS/dozor-run"
     codesign --force --timestamp --options runtime -s "$ID" --entitlements "$BUILD_TMP/host.entitlements" "$APP"
 else
     codesign --force -s - "$EXT"
+    codesign --force -s - "$APP/Contents/MacOS/dozor-watchdog"
     codesign --force -s - "$APP/Contents/MacOS/dozor-run"
     codesign --force -s - "$APP"
 fi

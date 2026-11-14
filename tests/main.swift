@@ -35,6 +35,12 @@ let dir = supportDir.appendingPathComponent(UUID().uuidString)
 try fm.createDirectory(at: dir, withIntermediateDirectories: true)
 try testServices()
 testRouteGuard()
+try testProfiles()
+try testDecisionHistory()
+expect(FilterController.configurationStatus(provider: "other", enabled: true, sockets: true, port: 80).contains("отсутствует") &&
+       FilterController.configurationStatus(provider: FilterController.identifier, enabled: false, sockets: true, port: 80).contains("выключена") &&
+       FilterController.configurationStatus(provider: FilterController.identifier, enabled: true, sockets: true, port: 1234).contains("1234"),
+       "system filter status distinguishes a different provider, disabled filter and the configured port")
 // Independent kernel UDP receiver: each fixture level writes a distinct tag.
 let heartbeatSocket = socket(AF_INET, SOCK_DGRAM, 0)
 precondition(heartbeatSocket >= 0)
@@ -195,6 +201,17 @@ var vpnUp = false
 m.vpnConnected = { id in id == "fixture-vpn" && vpnUp }
 reply(m,begin(m)); held("selected VPN off, listener up, ALL probes positive: zero SIGCONT")
 vpnUp = true; m.enforce(); held("VPN reconnected but no new probe: zero SIGCONT")
+m.cfg.guard.grace = 1
+m.blockedSince = Date(timeIntervalSinceNow:-100)
+m.setManualHold(true)
+reply(m,begin(m)); held("manual hold survives full VPN proof and keeps all three fixtures alive")
+expect(loadConfig().0.guard.manual_hold && m.protectionStatus == .manual, "manual lock persists across a config reload")
+m.togglePause()
+expect(!m.paused && m.cfg.guard.manual_hold, "pause cannot override manual hold")
+let duringHold = begin(m)
+m.setManualHold(false)
+reply(m,duringHold); held("unlock invalidates the old generation without resuming")
+m.cfg.guard.grace = 0
 reply(m,begin(m)); waitForStopped(false); usleep(180000)
 expect(receivedLevels() == [0,1,2], "all three fixtures deliver UDP again after fresh VPN proof")
 expect(continues == 3 && zip(heldBeats,beats()).allSatisfy { $0 != $1 }, "fresh full proof resumes all three; each heartbeat advances")

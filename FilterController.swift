@@ -13,6 +13,26 @@ final class FilterController: NSObject, ObservableObject, OSSystemExtensionReque
         guard let task = SecTaskCreateFromSelf(nil) else { return false }
         return SecTaskCopyValueForEntitlement(task,"com.apple.developer.system-extension.install" as CFString,nil) as? Bool == true
     }
+    static func configurationStatus(provider: String?, enabled: Bool, sockets: Bool, port: Int?) -> String {
+        guard provider == identifier else { return "Конфигурация фильтра Dozor отсутствует" }
+        guard enabled, sockets else { return "Фильтрация сокетов Dozor выключена в настройках macOS" }
+        guard let port, (1...65535).contains(port) else { return "В конфигурации фильтра указан неверный порт" }
+        return "В настройках macOS включена фильтрация сокетов Dozor. Разрешён локальный TCP-порт \(port)."
+    }
+
+    func refreshStatus() {
+        guard canInstall, !busy else { return }
+        busy = true
+        let manager = NEFilterManager.shared()
+        manager.loadFromPreferences { error in DispatchQueue.main.async {
+            defer { self.busy = false }
+            if let error { self.status = error.localizedDescription; return }
+            let config = manager.providerConfiguration
+            self.status = Self.configurationStatus(provider: config?.filterDataProviderBundleIdentifier,
+                                                   enabled: manager.isEnabled, sockets: config?.filterSockets == true,
+                                                   port: config?.vendorConfiguration?["port"] as? Int)
+        } }
+    }
     func apply(_ cfg: GuardConfig) {
         guard canInstall, !busy, (1...65535).contains(cfg.proxy_port) else { return }
         var urls = Set<String>(), cli = false

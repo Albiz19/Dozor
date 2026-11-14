@@ -47,6 +47,7 @@ final class Monitor: ObservableObject {
         let reason: String
     }
     @Published private(set) var guardDecision: GuardDecision?
+    lazy var decisionHistory = DecisionHistory()
     @Published var paused = false
     @Published var frozen: [pid_t: String] = [:]   // pid -> имя приложения
     @Published var latency: [String: [[Double]]] = [:] // имя -> [[unix-время, мс]]
@@ -69,6 +70,28 @@ final class Monitor: ObservableObject {
     var readIncyTunnel: () -> IncyTunnel? = IncyTunnel.current
     var readIPv6Route: () -> IncyTunnel.DefaultRoute = { IncyTunnel.defaultRoute(AF_INET6) }
     private var roundVPNConnected = false
+    private struct IPv6Observation: Codable, Equatable {
+        let tunnel: IncyTunnel
+        let address: String
+    }
+    private var observationFile: URL {
+        processGuard.stateURL.deletingLastPathComponent().appendingPathComponent("ipv6-observation.json")
+    }
+    private lazy var previousIPv6: IPv6Observation? = {
+        guard let data = try? Data(contentsOf: observationFile) else { return nil }
+        return try? JSONDecoder().decode(IPv6Observation.self, from: data)
+    }()
+
+    // A disappearing HTTP answer does not show that the previous egress closed.
+    // Scope the observation to the Xray process birth and the concrete TUN identity.
+    private func observeIPv6(_ address: String, on tunnel: IncyTunnel) {
+        let next = IPv6Observation(tunnel: tunnel, address: address)
+        guard previousIPv6 != next else { return }
+        previousIPv6 = next
+        do { try JSONEncoder().encode(next).write(to: observationFile, options: .atomic) }
+        catch { log("Не удалось сохранить наблюдение IPv6 для следующего запуска") }
+    }
+
     private var roundV6Route: IncyTunnel.DefaultRoute = .unknown
     private var verifiedV6Route: IncyTunnel.DefaultRoute = .unknown
     private(set) var roundTunnel: IncyTunnel?
@@ -102,9 +125,25 @@ final class Monitor: ObservableObject {
         checkTasks.forEach { $0.cancel() }; checkTasks.removeAll()
         clearLaunchPermit()
     }
+    var instance: MonitorInstance?
+    private let crashWatchdog = CrashWatchdog()
+    @Published private(set) var recoveryError: String?
+
+    func configureRecovery() {
+        guard let instance, let executable = Bundle.main.executableURL else { return }
+        do {
+            try crashWatchdog.configure(enabled: cfg.crash_recovery, instance: instance, executable: executable)
+            recoveryError = nil
+        } catch {
+            recoveryError = "Не удалось запустить наблюдатель: " + error.localizedDescription
+        }
+    }
+
     func prepareForExit() {
+        if let instance { crashWatchdog.disarm(instance) }
         invalidateProof()
         processGuard.save()
+        decisionHistory.flush()
     }
     var guardTimer: Timer?
     var networkStore: SCDynamicStore?
@@ -295,6 +334,7 @@ final class Monitor: ObservableObject {
             return // Keep the last valid targets; malformed settings must not release them.
         }
         invalidateProof(); cfg = c; cfgError = nil
+        configureRecovery()
         if !force { log("Настройки перечитаны") }
         if !force && (interval(for:old) != interval(for:cfg) || old.latency_interval != cfg.latency_interval) {
             scheduleTimers()
@@ -307,9 +347,15 @@ final class Monitor: ObservableObject {
         let old = cfg
         var c = cfg
         change(&c)
-        invalidateProof(); cfg = c
+        invalidateProof()
+        guard saveConfig(c) else {
+            cfgError = "Не удалось сохранить настройки блокировки"
+            enforce()
+            return
+        }
+        cfg = c
         cfgError = nil
-        saveConfig(c)
+        if old.crash_recovery != c.crash_recovery { configureRecovery() }
         cfgMTime = configMTime()
         if interval(for:old) != interval(for:c) || old.latency_interval != c.latency_interval { scheduleTimers() }
         enforce()
@@ -466,12 +512,18 @@ final class Monitor: ObservableObject {
             if let tunnel = roundTunnel {
                 guard readIncyTunnel() == tunnel else { failRound("Туннель incy изменился во время проверки"); return }
                 guard roundV6Route == readIPv6Route() else { failRound("Маршрут IPv6 изменился во время проверки"); return }
+                let ipv6Exits = (answers + additionalRoutes + Array(traceRoutes.values))
+                    .filter { $0.contains(":") && isValidIP($0) }.sorted()
+                if let address = ipv6Exits.first(where: { !permittedIP($0) }) ?? ipv6Exits.first {
+                    observeIPv6(address, on: tunnel)
+                }
                 switch roundV6Route {
                 case .absent:
-                    guard !ipv6Confirmed && !additionalRoutes.contains(where: { $0.contains(":") }) &&
-                          !answers.contains(where: { $0.contains(":") }) else {
-                        failRound("Обнаружен выход IPv6 без основного IPv6-маршрута через туннель"); return
+                    if let seen = previousIPv6, seen.tunnel == tunnel {
+                        failRound("На этом туннеле обнаружен выход IPv6 \(seen.address). Маршрут IPv6 через VPN не подтверждён.")
+                        return
                     }
+                    guard !ipv6Confirmed else { failRound("Не подтверждён маршрут обнаруженного IPv6"); return }
                 case .interface(let index) where index == tunnel.index:
                     guard ipv6Confirmed else { failRound("Выход IPv6 через туннель не подтверждён"); return }
                 case .interface: failRound("Основной маршрут IPv6 проходит вне туннеля incy"); return
@@ -577,6 +629,7 @@ final class Monitor: ObservableObject {
 
     /// Cached decisions can keep a running app running, but never release a stopped app.
     func decision(proxyUp: Bool? = nil) -> (allowed: Bool, reason: String)? {
+        if cfg.guard.manual_hold { return (false, "Ручная блокировка") }
         if let cfgError { return (false, cfgError) }
         guard online, case .ok(let ip, _) = state else { return (false, state.title) }
         guard let verifiedAt, ProcessInfo.processInfo.systemUptime - verifiedAt < 12,
@@ -605,7 +658,23 @@ final class Monitor: ObservableObject {
         }
     }
 
+    private func recordPolicyDecision() {
+        let decision: DecisionHistory.Decision
+        if (paused && !cfg.guard.manual_hold) || !guardActive {
+            let holding = !processGuard.records.isEmpty
+            decision = .init(paused ? .paused : .inactive, reason: holding
+                ? "Новые приложения не замораживаются. Уже остановленные ждут проверки VPN."
+                : "Автоматическая заморозка новых приложений выключена.")
+        } else if let current = guardDecision {
+            decision = .init(current.allowed ? .allow : .block,
+                             reason: cfgError == nil ? current.reason : "Ошибка чтения настроек",
+                             addresses: current.allowed ? confirmedRoutes : [], rules: cfg.guard.allow.ips)
+        } else { return }
+        decisionHistory.record(decision)
+    }
+
     func enforce(freshGeneration: Int? = nil) {
+        defer { recordPolicyDecision() }
         guard guardActive || !processGuard.records.isEmpty else {
             if guardDecision != nil { guardDecision = nil }
             clearLaunchPermit()
@@ -641,6 +710,7 @@ final class Monitor: ObservableObject {
                     frozen = processGuard.names
                     if lostProof || !roundStillFresh || !mayThaw || !transportAvailable() {
                         invalidateProof(); lastProxyUp = false; state = .error("Подтверждение VPN утрачено при разморозке")
+                        guardDecision = GuardDecision(allowed: false, reason: state.title)
                         for (pid, rec) in heldBeforeRelease where rec.identity.isCurrent { processGuard.records[pid] = rec }
                         freezeMatched(reason: state.title); return
                     }
@@ -651,8 +721,13 @@ final class Monitor: ObservableObject {
             return
         }
         clearLaunchPermit()
-        if !guardActive || paused {
+        if !guardActive || (paused && !cfg.guard.manual_hold) {
             if !processGuard.records.isEmpty { processGuard.freeze(roots: []); frozen = processGuard.names }
+            return
+        }
+        if cfg.guard.manual_hold {
+            blockedSince = nil
+            freezeMatched(reason: "Ручная блокировка")
             return
         }
         if blockedSince == nil { blockedSince = Date() }
@@ -718,7 +793,17 @@ final class Monitor: ObservableObject {
 
     // MARK: Действия
 
+    func setManualHold(_ enabled: Bool) {
+        guard cfg.guard.manual_hold != enabled, !enabled || guardActive else { return }
+        paused = false
+        blockedSince = nil
+        updateConfig { $0.guard.manual_hold = enabled }
+        guard cfgError == nil else { log("Изменение ручной блокировки не сохранено"); return }
+        log(enabled ? "Включена ручная блокировка" : "Ручная блокировка снята, ожидается проверка VPN")
+    }
+
     func togglePause() {
+        guard !cfg.guard.manual_hold else { return }
         invalidateProof(); paused.toggle()
         log(paused ? "Блокировка поставлена на паузу" : "Блокировка снова включена")
         enforce()
@@ -744,7 +829,6 @@ final class Monitor: ObservableObject {
             "Label": "local.dozor",
             "ProgramArguments": [exe],
             "RunAtLoad": true,
-            "KeepAlive": ["SuccessfulExit": false],
             "ProcessType": "Interactive",
         ]
         try? FileManager.default.createDirectory(at: launchAgentURL.deletingLastPathComponent(), withIntermediateDirectories: true)

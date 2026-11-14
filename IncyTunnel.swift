@@ -2,7 +2,7 @@ import Foundation
 import Darwin
 
 /// Identity of a running incy Xray TUN, sampled both before a round and before each resume.
-struct IncyTunnel: Equatable {
+struct IncyTunnel: Equatable, Codable {
     let pid: pid_t
     let started: Int
     let microseconds: Int32

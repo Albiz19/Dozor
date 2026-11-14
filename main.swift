@@ -99,7 +99,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
         item("Открыть Дозор", "macwindow", #selector(openMain), key: "o")
         item("Настроить блокировку…", "slider.horizontal.3", #selector(openProtection))
-        if m.guardActive {
+        if m.guardActive || m.cfg.guard.manual_hold {
+            item(m.cfg.guard.manual_hold ? "Снять ручную блокировку" : "Заморозить до ручного снятия",
+                 "lock", #selector(toggleManualHold))
+        }
+        if m.guardActive && !m.cfg.guard.manual_hold {
             item(m.pauseActionTitle, m.paused ? "play.circle" : "pause.circle", #selector(togglePause))
         }
         item("Проверить сеть", "arrow.clockwise", #selector(checkNow), key: "r")
@@ -111,6 +115,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     @objc func openMain() { showWindow() }
     @objc func openProtection() { showWindow(.protection) }
     @objc func openSettings() { showWindow(.settings) }
+    @objc func toggleManualHold() { m.setManualHold(!m.cfg.guard.manual_hold) }
     @objc func togglePause() { m.togglePause() }
     @objc func checkNow() { m.checkNow(); m.measureLatency() }
     @objc func quit() { NSApp.terminate(nil) }
@@ -162,8 +167,10 @@ if CommandLine.arguments.count == 4, CommandLine.arguments[1] == "--make-icon",
     exit(0)
 }
 
+guard let monitorInstance = MonitorInstance(directory: supportDir, arguments: Array(CommandLine.arguments.dropFirst())) else { exit(0) }
 let app = NSApplication.shared
 let delegate = AppDelegate()
+delegate.m.instance = monitorInstance
 app.delegate = delegate
 app.setActivationPolicy(.regular)
 app.run()

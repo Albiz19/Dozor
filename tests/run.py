@@ -20,9 +20,9 @@ with tempfile.TemporaryDirectory(prefix='dozor-checks-') as temporary:
     env = dict(os.environ, CLANG_MODULE_CACHE_PATH=str(root / 'module-cache'), DOZOR_TEST_STATE=str(root / 'state'))
     subprocess.run(['clang', str(source / 'tests/fixture.c'), '-o', str(root / 'dozor-test-worker')], check=True, env=env)
     subprocess.run(['swiftc', '-O', '-swift-version', '5', '-target', 'arm64-apple-macos13.0',
-                    str(source / 'tests/main.swift'), str(source / 'tests/ServicesTests.swift'), str(source / 'tests/RouteGuardTests.swift'),
+                    str(source / 'tests/main.swift'), str(source / 'tests/ServicesTests.swift'), str(source / 'tests/RouteGuardTests.swift'), str(source / 'tests/ProfileTests.swift'), str(source / 'tests/DecisionHistoryTests.swift'), str(source / 'DecisionHistory.swift'),
                     str(source / 'Telegram.swift'), str(source / 'ReleaseUpdates.swift'), str(root / 'Core.swift'), str(source / 'ProcessGuard.swift'),
-                    str(source / 'IncyTunnel.swift'), str(source / 'Monitor.swift'), str(source / 'ProtectionStatus.swift'), str(source / 'FilterController.swift'), str(source / 'Filter/FlowPolicy.swift'), str(source / 'UI.swift'), '-o', str(root / 'verify'),
+                    str(source / 'IncyTunnel.swift'), str(source / 'Monitor.swift'), str(source / 'Watchdog.swift'), str(source / 'ProtectionStatus.swift'), str(source / 'FilterController.swift'), str(source / 'Filter/FlowPolicy.swift'), str(source / 'UI.swift'), '-o', str(root / 'verify'),
                     '-framework', 'AppKit', '-framework', 'SwiftUI', '-framework', 'Charts',
                     '-framework', 'Network', '-framework', 'SystemConfiguration'], check=True, env=env)
     subprocess.run(['clang', '-O2', '-Wall', '-Werror', '-DDOZOR_TEST_BUILD', str(source / 'GuardedLaunch.c'), '-o', str(root / 'dozor-run')], check=True, env=env)
@@ -47,3 +47,5 @@ with tempfile.TemporaryDirectory(prefix='dozor-checks-') as temporary:
             except (ValueError, ProcessLookupError):
                 pass
     subprocess.run([sys.executable, str(source / 'tests/network.py'), str(root / 'dozor-run'), str(root / 'verify')], check=True, env=env, timeout=40)
+
+    subprocess.run([sys.executable, str(source / "tests/watchdog.py")], check=True, env=env, timeout=90)

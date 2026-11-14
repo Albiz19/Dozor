@@ -1,6 +1,6 @@
 cask "dozor" do
-  version "0.3.0"
-  sha256 "e1a0661fed9a57b762599289f270ec45d9976ce2db6ff62429ef5885dec270a5"
+  version "0.4.0"
+  sha256 "8e7677c540933919de8ad219ea013905d3f022bb4e326f27e352d851fd6ed868"
 
   url "https://github.com/Albiz19/Dozor/releases/download/v#{version}/Dozor-#{version}-macOS-arm64.zip"
   name "Dozor"
