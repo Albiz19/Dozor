@@ -1,6 +1,24 @@
 import AppKit
 import Foundation
 
+// Installer fixtures operate only inside the temporary test directory.
+if CommandLine.arguments.dropFirst().first == "update-stage" {
+    let args = CommandLine.arguments
+    let release = try JSONDecoder().decode(PublicRelease.self, from: Data(contentsOf: URL(fileURLWithPath: args[2])))
+    do {
+        let update = try AppUpdate(release: release, installed: "0.4.0")
+        let staged = try update.stage(archive: URL(fileURLWithPath: args[3]), replacing: URL(fileURLWithPath: args[4]))
+        print(staged.path)
+        exit(0)
+    } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
+}
+if CommandLine.arguments.dropFirst().first == "update-handoff" {
+    let args = CommandLine.arguments
+    try AppUpdate.handoff(staged: URL(fileURLWithPath: args[2]), app: URL(fileURLWithPath: args[3]))
+    usleep(300000)
+    exit(0)
+}
+
 // Expose only a synthetic permit issuer for the isolated socket suite.
 if CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "issue-permit",
    let port = Int(CommandLine.arguments[2]) {

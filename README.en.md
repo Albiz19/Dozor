@@ -16,6 +16,6 @@ Alternatively, clone the repository and run `./build.sh` with the Apple Command 
 
 Add your VPN's trusted exit IPs before enabling protection. Configure the local HTTP proxy port and VPN service ID. Auto-resume requires fresh route checks and a connected system VPN service or a verified incy Xray TUN. With a proxy-only VPN, the guard does not authorize selected processes. Process suspension alone cannot guarantee zero packet loss or prevent direct traffic before detection. For the CLI launcher, the local proxy must route protected destinations exclusively through the intended tunnel.
 
-Check for a stable release from Settings → Updates, or run `brew update` followed by `brew upgrade --cask albiz19/dozor/dozor`. The app stores configuration outside its bundle. See the [setup guide](docs/GUIDE.md) for proxy, Telegram and signing details.
+From version 0.4.1, choose **Settings → Updates → Обновить приложение** to download, verify and install the latest stable release and restart Dozor. Older versions require one manual upgrade. Homebrew users can also run `brew update` followed by `brew upgrade --cask albiz19/dozor/dozor`. The app stores configuration outside its bundle. See the [setup guide](docs/GUIDE.md) for proxy, Telegram and signing details.
 
 An experimental per-executable [Windows WFP console tool](windows/README.md) is available for testing.

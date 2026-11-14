@@ -821,7 +821,13 @@ struct SettingsView: View {
             }
 
             Section("Обновления") {
-                Button("Проверить обновления") { Task { await updates.check() } }.disabled(updates.checking)
+                HStack {
+                    Button(updates.candidate.map { "Обновить до " + $0.version + " и перезапустить" } ?? "Обновить приложение") {
+                        Task { await updates.install() }
+                    }.buttonStyle(.borderedProminent)
+                    Button("Проверить обновления") { Task { await updates.check() } }
+                    if updates.installing || updates.checking { ProgressView().controlSize(.small) }
+                }.disabled(updates.installing || updates.checking)
                 if !updates.message.isEmpty { Text(updates.message) }
                 if let url = updates.releaseURL { Link("Открыть выпуск на GitHub", destination: url) }
             }

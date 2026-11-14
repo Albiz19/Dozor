@@ -9,18 +9,20 @@ if [[ -n "${DOZOR_BUILD_DIR:-}" && ( -e "$APP" || -L "$APP" ) ]]; then
 fi
 mkdir -p "${APP:h}"
 RELEASE_VERSION=$(cat VERSION)
-BUILD_NUMBER=5
+BUILD_NUMBER=6
 BUILD_TMP=$(mktemp -d)
 trap 'rm -rf "$BUILD_TMP"' EXIT
 rm -rf -- "$APP"
 mkdir -p $APP/Contents/MacOS $APP/Contents/Resources
 swiftc -O -file-prefix-map "$PWD"=. -swift-version 5 -target arm64-apple-macos13.0 \
-  main.swift Watchdog.swift DecisionHistory.swift Telegram.swift ReleaseUpdates.swift Core.swift ProcessGuard.swift IncyTunnel.swift Monitor.swift ProtectionStatus.swift UI.swift FilterController.swift \
+  main.swift Watchdog.swift DecisionHistory.swift AppUpdate.swift Telegram.swift ReleaseUpdates.swift Core.swift ProcessGuard.swift IncyTunnel.swift Monitor.swift ProtectionStatus.swift UI.swift FilterController.swift \
   -o $APP/Contents/MacOS/Dozor -framework AppKit -framework SwiftUI -framework Charts -framework Network -framework SystemConfiguration
 
 clang -O2 -arch arm64 -ffile-prefix-map="$PWD"=. -Wall -Werror -mmacosx-version-min=13 GuardedLaunch.c -o $APP/Contents/MacOS/dozor-run
 
 swiftc -O -file-prefix-map "$PWD"=. -target arm64-apple-macos13.0 Watchdog/main.swift -o "$APP/Contents/MacOS/dozor-watchdog"
+
+swiftc -O -file-prefix-map "$PWD"=. -target arm64-apple-macos13.0 Updater/main.swift -o "$APP/Contents/MacOS/dozor-update"
 
 # Значок: приложение само рисует его в PNG нужных размеров.
 if [[ -n "${DOZOR_ICON_SOURCE:-}" ]]; then
